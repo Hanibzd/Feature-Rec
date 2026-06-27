@@ -1,0 +1,11 @@
+version: 1
+
+github:
+  checkName: Feature-Rec
+  acceptComment: "@{pr_author} validation passed; you can merge."
+  rejectComment: "@claude make the following changes:\n\n{review_comment}"
+
+slack:
+  channel: "C0123456789"
+  mention: "<!subteam^S0123456789|@product-team>"
+  approverUsergroups: ["S0123456789"]
