@@ -1,0 +1,407 @@
+# AutoDemo
+
+> **Every release publishes its own demo video — automatically.**
+
+When a feature lands in your CI/CD, an agent reads the **code diff**, **reproduces the changed
+interface 1:1 as Remotion components** (it does *not* film your app), **animates the new element**
+with a cinematic zoom + on-screen caption, renders a polished MP4, and publishes it. Zero humans in
+the loop, from `git push` to a published video.
+
+<sub>Hackathon MVP · TypeScript · Remotion · Claude · pnpm monorepo</sub>
+
+---
+
+## Table of contents
+
+- [What you get](#what-you-get)
+- [Why this is different](#why-this-is-different)
+- [How it works](#how-it-works)
+- [Quickstart](#quickstart)
+- [Commands](#commands)
+- [Project structure](#project-structure)
+- [Core concepts](#core-concepts)
+- [The UI Replication Agent](#the-ui-replication-agent)
+- [The cinematic layer & design system](#the-cinematic-layer--design-system)
+- [Configuration](#configuration)
+- [Extending: add your own feature](#extending-add-your-own-feature)
+- [Hard constraints](#hard-constraints)
+- [Project status & roadmap](#project-status--roadmap)
+- [Troubleshooting / FAQ](#troubleshooting--faq)
+- [Tech stack](#tech-stack)
+
+---
+
+## What you get
+
+Run one command:
+
+```bash
+pnpm demo
+```
+
+…and you get **`out/demo.mp4`** — a 1920×1080 · 30fps · **no-audio** video that shows:
+
+1. a **branded intro** (product name, release tag, PR number),
+2. the **changed UI reproduced 1:1** from the source code (real React/Remotion, not a screenshot),
+3. the **new element animated** (e.g. a toggle sliding on, a button popping in),
+4. a **camera zoom + spotlight + caption** highlighting exactly what changed,
+5. a **branded outro**.
+
+Plus `out/CHANGELOG.md` and `out/pr-comment.md` ready to publish.
+
+Two example features ship in the repo and render out of the box:
+
+| Fixture | Change | Hero animation |
+| --- | --- | --- |
+| `dark-mode-toggle` | a dark-mode toggle added to a Settings card | toggle **slides** on |
+| `invite-members` | an "Invite" button added to a Members panel | button **pops** in |
+
+---
+
+## Why this is different
+
+The "AI demo video" market (Synthesia, HeyGen, Supademo, Arcade…) turns *docs/scripts → video* or
+relies on *manual capture*. Open-source tools (e.g. git-glimpse) **film** the app with Playwright
+and drop a GIF in the PR. **AutoDemo films nothing** — it **regenerates the UI from its own code**,
+triggered by the real change, all the way to a published video.
+
+|                | Playwright capture | **1:1 reproduction (AutoDemo)** |
+| -------------- | ------------------ | ------------------------------- |
+| Quality        | screen-record, compression | **vector-crisp, deterministic** |
+| Reliability    | flaky (selectors, timeouts) | **no browser to drive, repeatable** |
+| Zoom           | needs real bounding boxes | **trivial: we place the hero, so we know its center** |
+| Speed          | needs a live deploy | **just reads the diff** |
+| Trade-off      | — | **fidelity capped on very complex UIs** → screenshot fallback |
+
+**The key to fidelity:** Tailwind is enabled *inside* Remotion, so the agent **reuses the exact
+`className`s** from the source component → near-free 1:1 reproduction. (No Tailwind in the source?
+The agent inlines the hex/px values extracted from the code.)
+
+---
+
+## How it works
+
+```
+ git push / PR
+      │
+      ▼
+ ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
+ │ analyze  │──►│  agent   │──►│ compose  │──►│  render  │──►│ publish  │
+ └──────────┘   └──────────┘   └──────────┘   └──────────┘   └──────────┘
+  read diff +    Claude         DemoPlan +     Remotion       changelog +
+  design tokens  reproduces     scene          bundle +       PR comment
+                 UI 1:1 &       registry       renderMedia
+                 animates                          │
+                 the hero                          ▼
+                                             out/demo.mp4
+```
+
+Each stage is a module in `packages/cli/src/`:
+
+1. **`analyze`** (`analyze.ts`) — collects *features*. A feature = a changed UI component
+   (`before` + `after` source) + PR metadata + the project's design tokens
+   (`apps/web/tailwind.config.ts` + `globals.css`). Source: a fixture in `fixtures/<id>/` **or** a
+   live `git diff` range (`--git HEAD~1`).
+2. **`agent`** (`agent/`) — the **UI Replication Agent**. Sends Claude the 5-section prompt with the
+   before/after code + tokens; Claude returns one Remotion scene that reproduces the changed markup
+   with its **exact classNames** and animates only the **hero** (the added/changed element). The
+   output is validated; if there's no API key or it fails, a **known-good** scene is used so a scene
+   is never empty. → [details](#the-ui-replication-agent)
+3. **`compose`** (`compose.ts` + `scenes.ts`) — writes the scene to
+   `packages/video/src/scenes/generated/<id>.tsx`, **regenerates the scene registry**
+   (`scenes/index.ts`), and builds the serializable **DemoPlan** (`out/plan.json`).
+4. **`render`** (`render.ts`) — `@remotion/bundler` bundles the project (Tailwind webpack override)
+   and `@remotion/renderer` `renderMedia` renders the `ReleaseDemo` composition, passing the
+   DemoPlan as `inputProps`. Output: `out/demo.mp4`, local & headless, **muted** (no audio track).
+5. **`publish`** (`publish.ts`) — prepends `out/CHANGELOG.md` and writes `out/pr-comment.md`
+   (`--post` posts it via the `gh` CLI).
+
+The composition (`ReleaseDemo.tsx`) is a `<Series>`: **Intro** (75 frames) → **scene(s)** (175
+frames each by default) → **Outro** (60 frames). The registry holds the (non-serializable)
+components; the DemoPlan holds only ids + props, so it can be passed to Remotion as `inputProps`.
+
+---
+
+## Quickstart
+
+**Requirements:** Node ≥ 20 and pnpm. Google Chrome / a headless shell is downloaded automatically
+by Remotion on first render.
+
+```bash
+pnpm install      # installs packages/video and packages/cli
+pnpm demo         # generate → render → publish on the bundled fixtures
+```
+
+That produces `out/demo.mp4` (no API key required — it uses the known-good scenes).
+
+Step by step, or target one feature:
+
+```bash
+pnpm generate --feature invite-members   # reproduce one diff → scene + plan
+pnpm render                              # bundle (Tailwind) + render → out/demo.mp4
+pnpm publish                             # write changelog + PR comment
+```
+
+Preview / live-edit scenes in the Remotion Studio:
+
+```bash
+pnpm studio
+```
+
+With an API key, the agent generates scenes from any real diff instead of using the fallback:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+pnpm generate --git HEAD~1               # detect changed UI components from a git range
+pnpm render
+```
+
+> **Node not found?** On some setups Node lives under nvm and isn't on `PATH` by default. Run
+> `nvm use` (or prefix commands with the nvm bin dir) before `pnpm`.
+
+---
+
+## Commands
+
+All run from the repo root. Arguments after the command are forwarded to the CLI.
+
+| Command | What it does |
+| --- | --- |
+| `pnpm demo` | Full pipeline (generate → render → publish) on **all** fixtures |
+| `pnpm demo --feature <id>` | Full pipeline on a single fixture |
+| `pnpm generate` | Reproduce diffs into scenes + build `out/plan.json` |
+| `pnpm generate --feature <id>` | …for one fixture only |
+| `pnpm generate --git <range>` | …from a git diff range (e.g. `HEAD~1`, `main...HEAD`) |
+| `pnpm generate --offline` | Skip the API; use known-good scenes only |
+| `pnpm render` | Bundle + render the current plan → `out/demo.mp4` |
+| `pnpm publish` | Write `out/CHANGELOG.md` + `out/pr-comment.md` |
+| `pnpm publish --post` | …and post the comment via the `gh` CLI (needs a PR number) |
+| `pnpm studio` | Open the Remotion Studio for live preview |
+| `pnpm typecheck` | `tsc --noEmit` across both packages |
+
+> If a flag doesn't seem to take effect through `pnpm <script> --flag`, use the explicit form:
+> `pnpm <script> -- --flag` (both work — a stray `--` is stripped by the CLI).
+
+---
+
+## Project structure
+
+```
+autodemo/
+├─ apps/web/                          # "the product" whose UI changes (Next.js + Tailwind)
+│  ├─ app/                            #   settings & members pages, globals.css (design tokens)
+│  ├─ components/
+│  │  ├─ SettingsCard.tsx             #   gained the dark-mode toggle
+│  │  └─ MembersCard.tsx              #   gained the Invite button
+│  └─ tailwind.config.ts             #   tokens read by the agent
+│
+├─ fixtures/                          # the diffs the pipeline reads (before/after + metadata)
+│  ├─ dark-mode-toggle/{before,after}.tsx + meta.json
+│  └─ invite-members/{before,after}.tsx + meta.json
+│
+├─ packages/
+│  ├─ video/  (@autodemo/video)       # the Remotion project
+│  │  ├─ remotion.config.ts           #   enables Tailwind for the Remotion CLI/Studio
+│  │  └─ src/
+│  │     ├─ index.ts                  #   registerRoot + imports index.css
+│  │     ├─ Root.tsx                  #   the <Composition> (1920×1080@30fps)
+│  │     ├─ schema.ts                 #   DemoPlan / Brand / SceneRef zod schemas + totalFrames()
+│  │     ├─ tokens.ts                 #   design system (colors, motion presets, frame counts)
+│  │     ├─ font.ts                   #   Inter via @remotion/google-fonts
+│  │     ├─ components/               #   Intro, Outro, Camera, Spotlight, Caption
+│  │     ├─ compositions/             #   ReleaseDemo (assembles everything), MissingScene
+│  │     └─ scenes/
+│  │        ├─ index.ts               #   the registry (AUTO-GENERATED)
+│  │        └─ generated/             #   scenes land here (agent output / known-good)
+│  │
+│  └─ cli/   (@autodemo/cli)          # analyze · agent · compose · render · publish
+│     ├─ src/
+│     │  ├─ index.ts                  #   commander entry (generate/render/publish/demo)
+│     │  ├─ analyze.ts                #   load features (fixtures or git) + project tokens
+│     │  ├─ compose.ts                #   build/read/write the DemoPlan
+│     │  ├─ scenes.ts                 #   write scene files + regenerate the registry
+│     │  ├─ render.ts                 #   bundle + renderMedia (muted)
+│     │  ├─ publish.ts                #   changelog + PR comment
+│     │  ├─ stills.ts                 #   dev helper: render frames to PNG for QA
+│     │  └─ agent/
+│     │     ├─ index.ts               #   replicate(): API path → offline fallback
+│     │     ├─ prompt.ts              #   the 5-section prompt + integration contract
+│     │     ├─ anthropic.ts           #   Claude call (model, max_tokens, stop_reason check)
+│     │     ├─ validate.ts            #   extract code block + invariant checks
+│     │     └─ offline.ts             #   the known-good scene set
+│     └─ scripts/validate-selftest.mts#   self-test for the validation logic
+│
+└─ out/                               # demo.mp4, plan.json, CHANGELOG.md, frames/  (gitignored)
+```
+
+> `apps/web` is intentionally **not** a pnpm workspace member — it is read as *text* (diff + tokens),
+> not installed or built by the monorepo. Run it standalone with `cd apps/web && pnpm install && pnpm dev`.
+
+---
+
+## Core concepts
+
+| Term | Meaning |
+| --- | --- |
+| **DemoPlan** | The serializable spine of a video: `{ brand, scenes[] }`. Built by the CLI, passed to Remotion as `inputProps`. JSON-only (no components/functions). |
+| **Scene** | One generated Remotion component reproducing a change. Exports a default component + a named zod `schema`. |
+| **Hero** | The new/changed element (the toggle, the button…). The **only** thing animated; the rest of the UI is static context. |
+| **Registry** | `scenes/index.ts` — maps `scene id → { Component, schema }`. Auto-regenerated so the bundle picks up new scenes. |
+| **Camera / Spotlight / Caption** | The cinematic chrome: zoom toward the hero, a scrim with a radial hole, and a labeling pill. |
+| **`focus`** | `{ x, y, scale }` in **composition pixels** (1920×1080). Because the agent lays out the hero, it knows its center → the zoom is just `scale` + `transformOrigin`. |
+
+---
+
+## The UI Replication Agent
+
+Lives in `packages/cli/src/agent/`. For each feature:
+
+1. **Prompt** (`prompt.ts`) — a system prompt (role + hard rules) plus a user prompt asking for **5
+   sections**: ① visual specs *extracted from the code*, ② video config, ③ data & props (zod), ④
+   animation logic (diff before/after → find the hero), ⑤ the self-contained Remotion component.
+   It includes an **integration contract** so the output drops straight into the project (see below).
+2. **Call** (`anthropic.ts`) — `@anthropic-ai/sdk`, model `claude-sonnet-4-6` (configurable). It
+   **fails fast on `stop_reason: "max_tokens"`** so a truncated response can't be written as a
+   broken scene.
+3. **Validate** (`validate.ts`) — extracts the last fenced code block (any language label; throws on
+   a truncated/unterminated fence), then enforces the invariants:
+   - must `export default` a component **and** `export const schema`,
+   - **no `<Audio>` / audio utils, no `fetch` / `XMLHttpRequest` / WebSocket / remote imports**,
+   - every **top-level schema field has a `.default()`** (so the scene renders with sparse props).
+4. **Write + fallback** (`index.ts`) — on success, writes the scene and regenerates the registry.
+   On any failure (or no `ANTHROPIC_API_KEY`), falls back to a **known-good** scene listed in
+   `offline.ts`. This is the "demo safety net": the pipeline never emits an empty scene.
+
+**Integration contract** (what a generated scene may rely on):
+
+- Saved to `packages/video/src/scenes/generated/<id>.tsx`; frames are **scene-relative**.
+- May import: `{ Camera, Spotlight, Caption }` from `../../components`,
+  `{ COLORS, RADIAL_BG, SPRING_SMOOTH, SPRING_POP }` from `../../tokens`,
+  `{ fontFamily }` from `../../font`, plus `remotion` and `zod`.
+- Root `<AbsoluteFill>` uses `style={{ background: RADIAL_BG, fontFamily }}`.
+- `export default function Scene(props: Partial<z.infer<typeof schema>>)`, starting with
+  `const { ... } = schema.parse(props ?? {})`.
+
+---
+
+## The cinematic layer & design system
+
+**Design tokens** (`tokens.ts`) — a "devtool premium dark" palette; the brand accent is the only
+vivid color. Base `#08080C`, glow `#14121F`, surface `#16161F`, accent `#6C5CE7`, text
+`#F5F5F7`/`#C7C7D2`/`#8A8A9A`. Typography: **Inter** (via `@remotion/google-fonts`), numbers in
+`tabular-nums`.
+
+> These tokens style the **brand chrome** (Intro/Outro/Camera/Spotlight/Caption). The **reproduced
+> UI** uses the target repo's own classNames/colors — fidelity comes from the source code, never
+> from here.
+
+**Motion presets:**
+- `SPRING_SMOOTH` `{ damping:200, mass:0.6, stiffness:100 }` — entrances + camera zoom, zero bounce.
+- `SPRING_POP` `{ damping:13, mass:0.8, stiffness:200 }` — pills, buttons (snappy pop).
+- Fades: `interpolate` + `Easing.out(Easing.cubic)`, clamped.
+
+**Camera / Spotlight / Caption:**
+- `<Camera>` scales the whole stage with `transform: scale()` + `transformOrigin: "${x}px ${y}px"`.
+- `<Spotlight>` is a screen-space scrim with a `radial-gradient` mask hole over the hero while zoomed.
+- `<Caption>` is an accent pill that pops in (`SPRING_POP`) near the hero.
+
+**Typical choreography** (scene-relative frames): `[0–14]` stage + context fade/scale in →
+`[14–30]` hero reveal → `[40…]` camera zoom + spotlight (hold, ease back) → `~54` caption pops.
+
+---
+
+## Configuration
+
+Environment variables (optional — copy `.env.example` or just `export`):
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` | — | Enables the live agent. Without it, known-good scenes are used. |
+| `AUTODEMO_MODEL` | `claude-sonnet-4-6` | Model used for replication. |
+| `AUTODEMO_MAX_TOKENS` | `16000` | Output token ceiling for the agent. |
+
+---
+
+## Extending: add your own feature
+
+**1. Drop a fixture:**
+
+```
+fixtures/<my-feature>/
+  before.tsx     # the component before the change
+  after.tsx      # the component after the change
+  meta.json      # { id, file, prTitle, prNumber, releaseTag, productName, description, caption }
+```
+
+**2. Generate + render** (needs `ANTHROPIC_API_KEY`):
+
+```bash
+pnpm generate --feature <my-feature>
+pnpm render
+```
+
+**3. (Optional) Make it work offline** — for a guaranteed demo without a key, add the id to the
+`KNOWN_GOOD` set in `packages/cli/src/agent/offline.ts` and ship a hand-checked scene in
+`packages/video/src/scenes/generated/<my-feature>.tsx` (follow the integration contract above).
+
+To QA a render frame-by-frame, edit the frame list in `packages/cli/src/stills.ts` and run
+`pnpm --filter @autodemo/cli exec tsx src/stills.ts` → PNGs in `out/frames/`.
+
+---
+
+## Hard constraints
+
+These are enforced by design and by validation:
+
+- **No audio.** No TTS, no narration, no `<Audio>`. Captions on-screen carry the explanation; the
+  render is `muted` (no audio track at all).
+- **Reproduce from code, never capture.** The UI is re-rendered in React/Remotion (no Playwright).
+- **No network** inside generated scenes.
+- **Local render only** (no Lambda in the MVP).
+- **Landscape 1920×1080 @ 30fps.**
+- **Colors/typography come from the code**, never invented.
+
+---
+
+## Project status & roadmap
+
+**Working & verified today:**
+- Full pipeline (`analyze → agent → compose → render → publish`), end-to-end.
+- Two mocks render correctly (toggle slide + button pop); typecheck clean; agent validation
+  self-tested; reviewed by a multi-agent adversarial pass (6 findings, all fixed).
+- All hard constraints hold (audio-track probe confirms zero audio).
+
+**Not wired yet:**
+- **GitHub Action** that runs `autodemo` on a PR (the pipeline exists; only the workflow YAML is
+  missing).
+- **Screenshot fallback** for UIs too complex to reproduce (today the net is `MissingScene`, which
+  guarantees a frame is never empty).
+
+---
+
+## Troubleshooting / FAQ
+
+- **`node: command not found` / `env: node: No such file or directory`** — Node is installed via
+  nvm and not on `PATH`. Run `nvm use` (or add the nvm bin dir to `PATH`) before `pnpm`.
+- **pnpm: "Ignored build scripts: esbuild"** — `tsx` needs esbuild's binary. The root
+  `package.json` allow-lists it via `pnpm.onlyBuiltDependencies`; run `pnpm rebuild esbuild` if
+  needed.
+- **First render is slow / "Downloading Chrome Headless Shell"** — Remotion downloads a headless
+  browser once (~90 MB), then caches it.
+- **`<w> [webpack.cache...] Caching failed for pack`** — harmless webpack cache warning; the render
+  still succeeds.
+- **No video / "No known-good scene" error** — you generated a new fixture without an API key and
+  without registering an offline scene. Set `ANTHROPIC_API_KEY`, or add the offline scene (see
+  [Extending](#extending-add-your-own-feature)).
+- **A `--flag` is ignored** — use `pnpm <script> -- --flag` (or the explicit
+  `pnpm --filter @autodemo/cli exec tsx src/index.ts <cmd> --flag`).
+
+---
+
+## Tech stack
+
+TypeScript · Node 20+ · pnpm workspaces · **Remotion 4** (`@remotion/bundler`, `@remotion/renderer`,
+`@remotion/tailwind-v4`, `@remotion/google-fonts`) · React 19 · Tailwind v4 ·
+**`@anthropic-ai/sdk`** (model `claude-sonnet-4-6`) · `zod` · `commander`. Test app: Next.js 15.
+
+<sub>AutoDemo — no humans in the loop, from the diff to the published video.</sub>

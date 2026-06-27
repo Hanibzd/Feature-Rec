@@ -1,0 +1,24 @@
+{
+  "name": "autodemo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "AutoDemo — every release publishes its own video, automatically. Reads the UI diff, reproduces the changed interface 1:1 in Remotion, animates the new element, renders an MP4.",
+  "packageManager": "pnpm@10.5.2",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "demo": "pnpm --filter @autodemo/cli run demo",
+    "generate": "pnpm --filter @autodemo/cli run generate",
+    "render": "pnpm --filter @autodemo/cli run render",
+    "publish": "pnpm --filter @autodemo/cli run publish",
+    "studio": "pnpm --filter @autodemo/video run studio",
+    "typecheck": "pnpm -r run typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}

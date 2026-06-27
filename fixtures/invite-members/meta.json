@@ -1,0 +1,10 @@
+{
+  "id": "invite-members",
+  "file": "components/MembersCard.tsx",
+  "prTitle": "Add Invite button to Members panel",
+  "prNumber": 142,
+  "releaseTag": "v1.5.0",
+  "productName": "Acme",
+  "description": "Workspace admins can now invite teammates straight from the Members panel via a new primary Invite button.",
+  "caption": "New — invite teammates"
+}

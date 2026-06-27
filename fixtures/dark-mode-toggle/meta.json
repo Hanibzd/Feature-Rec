@@ -1,0 +1,10 @@
+{
+  "id": "dark-mode-toggle",
+  "file": "components/SettingsCard.tsx",
+  "prTitle": "Add dark mode toggle to Settings",
+  "prNumber": 128,
+  "releaseTag": "v1.4.0",
+  "productName": "Acme",
+  "description": "Users can now switch the app to dark mode from Settings → Appearance. A new toggle persists the theme preference per workspace.",
+  "caption": "New — dark mode toggle"
+}

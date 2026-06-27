@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+/*
+ * The reproduced UI relies on Tailwind utility classes (incl. arbitrary values
+ * like bg-[#16161F]) so the same classNames from the target repo render 1:1.
+ * Tailwind v4 scans the source for class literals automatically.
+ */
+:root {
+  color-scheme: dark;
+}
