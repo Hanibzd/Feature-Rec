@@ -1,22 +1,28 @@
-# AutoDemo
+# Feature-Rec
 
-> **Every release publishes its own demo video — automatically.**
+> **A GitHub Action that turns ready PRs into Slack product validation.**
 
-When a feature lands in your CI/CD, an agent reads the **code diff**, **reproduces the changed
-interface 1:1 as Remotion components** (it does *not* film your app), **animates the new element**
-with a cinematic zoom + on-screen caption, renders a polished MP4, and publishes it. Zero humans in
-the loop, from `git push` to a published video.
+When a PR is opened or updated in **ready for review**, Feature-Rec checks whether the diff contains
+a frontend-visible change. Backend-only, docs-only, test-only, dependency-only, and CI-only changes
+are accepted automatically. If the change affects product UX, Feature-Rec generates a Remotion MP4
+of the change, posts it to Slack, tags the configured product group, and keeps the `Feature-Rec`
+Check Run pending until a business reviewer approves or requests changes.
 
-<sub>Hackathon MVP · TypeScript · Remotion · Claude · pnpm monorepo</sub>
+The video generation layer is **AutoDemo**: it reads changed UI code, reproduces the interface as
+Remotion components, animates the new element, and renders a polished MP4 without screen-recording
+the app.
+
+<sub>Hackathon MVP · GitHub Actions · Slack · Remotion · Claude · pnpm monorepo</sub>
 
 ---
 
 ## Table of contents
 
 - [What you get](#what-you-get)
+- [The product loop](#the-product-loop)
 - [Why this is different](#why-this-is-different)
 - [How it works](#how-it-works)
-- [Feature-Rec: Slack validation for PRs](#feature-rec-slack-validation-for-prs)
+- [AutoDemo video engine](#autodemo-video-engine)
 - [Quickstart](#quickstart)
 - [Commands](#commands)
 - [Project structure](#project-structure)
@@ -34,13 +40,30 @@ the loop, from `git push` to a published video.
 
 ## What you get
 
-Run one command:
+Install Feature-Rec on a repository and every ready PR gets a product-aware gate:
+
+| PR diff | Feature-Rec behavior | Check Run result |
+| --- | --- | --- |
+| No frontend-visible product change | LLM classifier accepts the PR without bothering product. | `accepted` / success |
+| Frontend-visible product change | AutoDemo renders an MP4, the bot posts it to Slack, and configured reviewers choose what happens. | `pending` / in progress |
+| Product clicks **All good, merge** | Feature-Rec accepts the Check Run and posts the configured merge-ready comment to the PR author. | `accepted` / success |
+| Product clicks **Request changes** | Slack requires a comment, then Feature-Rec posts it to GitHub as the configured `@claude make the following changes: ...` comment. | `rejected` / action required |
+
+The Slack message has exactly the two decisions product needs:
+
+- **All good, merge**
+- **Request changes**
+
+When changes are requested, Claude can iterate on the PR, push a follow-up commit, and the next
+`synchronize` event starts the same loop again.
+
+For the video engine by itself, run:
 
 ```bash
 pnpm demo
 ```
 
-…and you get **`out/demo.mp4`** — a 1920×1080 · 30fps · **no-audio** video that shows:
+That produces **`out/demo.mp4`** — a 1920×1080 · 30fps · **no-audio** video that shows:
 
 1. a **branded intro** (product name, release tag, PR number),
 2. the **changed UI reproduced 1:1** from the source code (real React/Remotion, not a screenshot),
@@ -49,10 +72,6 @@ pnpm demo
 5. a **branded outro**.
 
 Plus `out/CHANGELOG.md` and `out/pr-comment.md` ready to publish.
-
-The repo also ships **Feature-Rec**, a PR validation workflow that uses AutoDemo as its video
-engine: a GitHub Action classifies frontend-visible PR changes, renders an MP4 for qualifying
-changes, posts it to Slack, and gates the `Feature-Rec` Check Run on product approval.
 
 Two example features ship in the repo and render out of the box:
 
@@ -63,12 +82,38 @@ Two example features ship in the repo and render out of the box:
 
 ---
 
+## The product loop
+
+Feature-Rec is designed for the gap between code review and product validation:
+
+1. A PR is opened, marked ready for review, or updated with a follow-up commit.
+2. The Feature-Rec GitHub Action starts a `Feature-Rec` Check Run.
+3. An LLM reads the PR diff and decides whether a product or business counterpart needs to look.
+4. If the change is not frontend-visible, the Check Run is accepted automatically.
+5. If the change is frontend-visible, the LLM understands the feature from the diff and AutoDemo
+   renders a Remotion video of the UI change.
+6. The backend uploads the video to the configured Slack channel and tags the configured group from
+   `.github/feature-rec-config.yaml`.
+7. A product reviewer clicks **All good, merge** or **Request changes**.
+8. Approval accepts the Check Run and comments that the developer can merge.
+9. Rejection requires a Slack comment, forwards that comment to GitHub as
+   `@claude make the following changes: ...`, and marks the Check Run as action required.
+
+This keeps product validation inside the merge gate without asking product to read diffs or pull a
+branch locally.
+
+---
+
 ## Why this is different
+
+Feature-Rec is not a demo-video toy bolted onto CI. It is a merge gate for product-visible changes:
+the action decides when product needs to be involved, gives product a short visual artifact in
+Slack, and maps the decision back to GitHub branch protection.
 
 The "AI demo video" market (Synthesia, HeyGen, Supademo, Arcade…) turns *docs/scripts → video* or
 relies on *manual capture*. Open-source tools (e.g. git-glimpse) **film** the app with Playwright
 and drop a GIF in the PR. **AutoDemo films nothing** — it **regenerates the UI from its own code**,
-triggered by the real change, all the way to a published video.
+triggered by the real change, so Feature-Rec can produce deterministic review media from CI.
 
 |                | Playwright capture | **1:1 reproduction (AutoDemo)** |
 | -------------- | ------------------ | ------------------------------- |
@@ -87,21 +132,78 @@ The agent inlines the hex/px values extracted from the code.)
 ## How it works
 
 ```
- git push / PR
+ ready PR event
       │
       ▼
- ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
- │ analyze  │──►│  agent   │──►│ compose  │──►│  render  │──►│ publish  │
- └──────────┘   └──────────┘   └──────────┘   └──────────┘   └──────────┘
-  read diff +    Claude         DemoPlan +     Remotion       changelog +
-  design tokens  reproduces     scene          bundle +       PR comment
-                 UI 1:1 &       registry       renderMedia
-                 animates                          │
-                 the hero                          ▼
+ ┌──────────────┐    ┌──────────────┐
+ │ GitHub Action│───►│ LLM classifier│
+ └──────────────┘    └──────────────┘
+      │                     │
+      │                     ├─ no frontend-visible change ──► accept Check Run
+      │                     │
+      │                     ▼
+      │              ┌──────────────┐    ┌──────────────┐
+      └─────────────►│ AutoDemo MP4 │───►│ Slack review │
+                     └──────────────┘    └──────────────┘
+                                              │
+                 ┌────────────────────────────┴────────────────────────────┐
+                 ▼                                                         ▼
+          All good, merge                                      Request changes + comment
+                 │                                                         │
+                 ▼                                                         ▼
+          accept Check Run                         GitHub comment + action required Check Run
+```
+
+Feature-Rec has three runtime parts:
+
+1. **Action** (`packages/action`) — runs on `pull_request` events for opened, ready-for-review, and
+   synchronized PRs. It reads `.github/feature-rec-config.yaml`, starts a review cycle, classifies
+   the diff, renders the video when needed, and uploads the MP4 to the backend.
+2. **Backend** (`packages/service`) — owns the long-lived review cycle: GitHub Check Run lifecycle,
+   Slack video upload, Slack buttons, request-changes modal, reviewer authorization, and GitHub PR
+   comments.
+3. **Shared config** (`packages/core`) — validates the GitHub and Slack configuration, templates
+   comments, and keeps action/backend payloads aligned.
+
+The target repository controls the product routing:
+
+```yaml
+version: 1
+
+github:
+  checkName: Feature-Rec
+  acceptComment: "@{pr_author} validation passed; you can merge."
+  rejectComment: "@claude make the following changes:\n\n{review_comment}"
+
+slack:
+  channel: "C0123456789"
+  mention: "<!subteam^S0123456789|@product-team>"
+  approverUsergroups: ["S0123456789"]
+```
+
+---
+
+## AutoDemo video engine
+
+AutoDemo is the Remotion engine Feature-Rec uses when the classifier finds a frontend-visible
+change. Its standalone pipeline is:
+
+```
+ UI diff
+   │
+   ▼
+┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
+│ analyze  │──►│  agent   │──►│ compose  │──►│  render  │
+└──────────┘   └──────────┘   └──────────┘   └──────────┘
+ read diff +    Claude         DemoPlan +     Remotion
+ design tokens  reproduces     scene          bundle +
+                UI 1:1 &       registry       renderMedia
+                animates                         │
+                the hero                         ▼
                                              out/demo.mp4
 ```
 
-Each stage is a module in `packages/cli/src/`:
+Each video stage is a module in `packages/cli/src/`:
 
 1. **`analyze`** (`analyze.ts`) — collects *features*. A feature = a changed UI component
    (`before` + `after` source) + PR metadata + the project's design tokens
@@ -127,20 +229,9 @@ components; the DemoPlan holds only ids + props, so it can be passed to Remotion
 
 ---
 
-## Feature-Rec: Slack validation for PRs
+## Feature-Rec setup
 
-Feature-Rec turns frontend-visible PRs into a Slack review loop:
-
-```
- PR opened / ready / updated
-      │
-      ▼
- GitHub Action ──► classify diff ──► render AutoDemo MP4 ──► Slack buttons
-      │                                                        │
-      ├─ no frontend-visible change ──────────────────────────► accept check
-      │                                                        │
-      └─ request changes modal ──► GitHub PR comment ──► reject check
-```
+Feature-Rec is configured in the target repository and by the local demo backend:
 
 The workflow has three packages plus one AutoDemo adapter:
 
@@ -171,9 +262,28 @@ checks.
 **Requirements:** Node ≥ 20 and pnpm. Google Chrome / a headless shell is downloaded automatically
 by Remotion on first render.
 
+Start the local Feature-Rec backend:
+
 ```bash
-pnpm install      # installs packages/video and packages/cli
-pnpm demo         # generate → render → publish on the bundled fixtures
+pnpm install
+cp .env.example .env   # fill GitHub, Slack, and shared runner-token values
+pnpm feature-rec:service
+```
+
+Expose that backend with a tunnel, then copy the example config and workflow into the target repo:
+
+```text
+.github/feature-rec-config.yaml
+.github/workflows/feature-rec.yml
+```
+
+The target repo sets `FEATURE_REC_API_URL`, `FEATURE_REC_RUNNER_TOKEN`, and `ANTHROPIC_API_KEY`.
+From there, every opened, ready-for-review, or synchronized PR runs the product validation loop.
+
+To smoke-test the AutoDemo video engine locally:
+
+```bash
+pnpm demo         # generate -> render -> publish on the bundled fixtures
 ```
 
 That produces `out/demo.mp4` (no API key required — it uses the known-good scenes).
@@ -181,8 +291,8 @@ That produces `out/demo.mp4` (no API key required — it uses the known-good sce
 Step by step, or target one feature:
 
 ```bash
-pnpm generate --feature invite-members   # reproduce one diff → scene + plan
-pnpm render                              # bundle (Tailwind) + render → out/demo.mp4
+pnpm generate --feature invite-members   # reproduce one diff -> scene + plan
+pnpm render                              # bundle (Tailwind) + render -> out/demo.mp4
 pnpm publish                             # write changelog + PR comment
 ```
 
@@ -233,7 +343,7 @@ All run from the repo root. Arguments after the command are forwarded to the CLI
 ## Project structure
 
 ```
-autodemo/
+agora/
 ├─ apps/web/                          # "the product" whose UI changes (Next.js + Tailwind)
 │  ├─ app/                            #   settings & members pages, globals.css (design tokens)
 │  ├─ components/
@@ -367,7 +477,7 @@ vivid color. Base `#08080C`, glow `#14121F`, surface `#16161F`, accent `#6C5CE7`
 
 ## Configuration
 
-Environment variables (optional — copy `.env.example` or just `export`):
+AutoDemo environment variables (optional — copy `.env.example` or just `export`):
 
 | Var | Default | Purpose |
 | --- | --- | --- |
@@ -485,4 +595,4 @@ TypeScript · Node 20+ · pnpm workspaces · **Remotion 4** (`@remotion/bundler`
 **`@anthropic-ai/sdk`** (model `claude-sonnet-4-6`) · `zod` · `commander` · Fastify · SQLite ·
 Slack Web API · GitHub Checks API. Test app: Next.js 15.
 
-<sub>AutoDemo — no humans in the loop, from the diff to the published video.</sub>
+<sub>Feature-Rec — product validation from PR diff to Slack decision.</sub>
