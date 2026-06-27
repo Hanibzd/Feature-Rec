@@ -11,6 +11,7 @@
     "selftest": "tsx scripts/selftest.mts"
   },
   "dependencies": {
+    "yaml": "^2.9.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

@@ -11,6 +11,8 @@ import { GitHubClient } from "./github";
 import { SlackClient, verifySlackSignature } from "./slack";
 import type { CycleStore } from "./storage";
 
+const VIDEO_BODY_LIMIT_BYTES = 500 * 1024 * 1024;
+
 type SlackPayload = {
   type: "block_actions" | "view_submission";
   trigger_id?: string;
@@ -32,15 +34,13 @@ function param(params: unknown, key: string): string {
   return value;
 }
 
-function runnerAuthorized(env: ServiceEnv, header: unknown): boolean {
-  if (!env.runnerToken) return true;
-  return header === `Bearer ${env.runnerToken}`;
-}
-
-function verifyGitHubWebhook(secret: string, rawBody: string, signature: string): boolean {
-  if (!signature.startsWith("sha256=")) return false;
-  const expected = `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`;
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+function timingSafeStringEqual(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left);
+  const rightBytes = Buffer.from(right);
+  return (
+    leftBytes.byteLength === rightBytes.byteLength &&
+    crypto.timingSafeEqual(leftBytes, rightBytes)
+  );
 }
 
 function classifierSummary(raw: unknown): string {
@@ -54,6 +54,11 @@ function classifierSummary(raw: unknown): string {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function runnerAuthorized(env: ServiceEnv, header: unknown): boolean {
+  if (!env.runnerToken || typeof header !== "string") return false;
+  return timingSafeStringEqual(header, `Bearer ${env.runnerToken}`);
 }
 
 export function buildServer(input: {
@@ -76,8 +81,11 @@ export function buildServer(input: {
       try {
         const rawBody = String(body);
         const parsed = rawBody ? JSON.parse(rawBody) : {};
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          (parsed as Record<string, unknown>).__rawBody = rawBody;
+        if (parsed && typeof parsed === "object") {
+          Object.defineProperty(parsed, "__rawBody", {
+            value: rawBody,
+            enumerable: false,
+          });
         }
         done(null, parsed);
       } catch (err) {
@@ -99,18 +107,6 @@ export function buildServer(input: {
   );
 
   app.get("/health", async () => ({ ok: true }));
-
-  app.post("/api/github/webhook", async (request, reply) => {
-    const rawBody =
-      typeof request.body === "object" && request.body
-        ? String((request.body as Record<string, unknown>).__rawBody ?? "{}")
-        : "{}";
-    const signature = String(request.headers["x-hub-signature-256"] ?? "");
-    if (env.githubWebhookSecret && !verifyGitHubWebhook(env.githubWebhookSecret, rawBody, signature)) {
-      return reply.code(401).send({ error: "invalid signature" });
-    }
-    return { ok: true };
-  });
 
   app.post("/api/runs/start", async (request, reply) => {
     if (!runnerAuthorized(env, request.headers.authorization)) {
@@ -183,29 +179,33 @@ export function buildServer(input: {
     return { ok: true };
   });
 
-  app.post("/api/runs/:cycleId/video", async (request, reply) => {
-    if (!runnerAuthorized(env, request.headers.authorization)) {
-      return reply.code(401).send({ error: "unauthorized" });
-    }
-    const cycle = store.getCycle(param(request.params, "cycleId"));
-    if (!cycle) return reply.code(404).send({ error: "cycle not found" });
-    const video = Buffer.isBuffer(request.body) ? request.body : Buffer.from([]);
-    if (video.byteLength === 0) return reply.code(400).send({ error: "empty video body" });
+  app.post(
+    "/api/runs/:cycleId/video",
+    { bodyLimit: VIDEO_BODY_LIMIT_BYTES },
+    async (request, reply) => {
+      if (!runnerAuthorized(env, request.headers.authorization)) {
+        return reply.code(401).send({ error: "unauthorized" });
+      }
+      const cycle = store.getCycle(param(request.params, "cycleId"));
+      if (!cycle) return reply.code(404).send({ error: "cycle not found" });
+      const video = Buffer.isBuffer(request.body) ? request.body : Buffer.from([]);
+      if (video.byteLength === 0) return reply.code(400).send({ error: "empty video body" });
 
-    await github.updateCheckRun(cycle, {
-      status: "in_progress",
-      output: {
-        title: "Feature-Rec: pending validation",
-        summary: "Frontend-visible change rendered and sent to Slack for validation.",
-      },
-    });
-    store.updateStatus(cycle.id, "pending_validation");
+      await github.updateCheckRun(cycle, {
+        status: "in_progress",
+        output: {
+          title: "Feature-Rec: pending validation",
+          summary: "Frontend-visible change rendered and sent to Slack for validation.",
+        },
+      });
+      store.updateStatus(cycle.id, "pending_validation");
 
-    await slack.uploadVideo(cycle.config, cycle, video);
-    const message = await slack.postValidation(cycle.config, cycle);
-    store.updateSlackMessage(cycle.id, message.channel, message.ts);
-    return { ok: true, channel: message.channel, ts: message.ts };
-  });
+      await slack.uploadVideo(cycle.config, cycle, video);
+      const message = await slack.postValidation(cycle.config, cycle);
+      store.updateSlackMessage(cycle.id, message.channel, message.ts);
+      return { ok: true, channel: message.channel, ts: message.ts };
+    },
+  );
 
   app.post("/api/slack/interactivity", async (request, reply) => {
     const rawBody = String(request.body ?? "");
@@ -246,10 +246,14 @@ export function buildServer(input: {
     const action = payload.actions?.[0];
     const value = SlackApprovalPayloadSchema.parse(JSON.parse(action?.value ?? "{}"));
     const interactionId = `block:${payload.trigger_id ?? ""}:${action?.action_ts ?? ""}:${value.action}`;
-    if (!store.recordProcessedInteraction(interactionId, value.cycleId)) return;
 
     const cycle = store.getCycle(value.cycleId);
     if (!cycle) return;
+    if (!(await slack.isApprover(cycle.config, payload.user?.id))) {
+      app.log.warn({ cycleId: cycle.id, slackUserId: payload.user?.id }, "unauthorized Slack approver");
+      return;
+    }
+    if (!store.recordProcessedInteraction(interactionId, value.cycleId)) return;
     if (cycle.status === "superseded" || cycle.headSha !== value.headSha) {
       await slack.finalize(cycle, "superseded", "This validation request is stale.");
       return;
@@ -271,9 +275,13 @@ export function buildServer(input: {
     const meta = JSON.parse(payload.view?.private_metadata ?? "{}") as { cycleId?: string; headSha?: string };
     const cycleId = meta.cycleId ?? "";
     const interactionId = `view:${payload.view?.id ?? ""}:${payload.view?.hash ?? ""}`;
-    if (!store.recordProcessedInteraction(interactionId, cycleId)) return;
     const cycle = store.getCycle(cycleId);
     if (!cycle) return;
+    if (!(await slack.isApprover(cycle.config, payload.user?.id))) {
+      app.log.warn({ cycleId: cycle.id, slackUserId: payload.user?.id }, "unauthorized Slack approver");
+      return;
+    }
+    if (!store.recordProcessedInteraction(interactionId, cycleId)) return;
     if (cycle.status === "superseded" || cycle.headSha !== meta.headSha) {
       await slack.finalize(cycle, "superseded", "This validation request is stale.");
       return;

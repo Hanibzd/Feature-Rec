@@ -56,4 +56,25 @@ assert.equal(
   false,
 );
 
+const yamlConfig = parseFeatureRecConfig(`
+version: 1
+github:
+  checkName: Feature-Rec
+  acceptComment: "@{pr_author} validation passed; you can merge."
+  rejectComment: |
+    @claude make the following changes:
+
+    {review_comment}
+slack:
+  channel: "C0123 # design-review"
+  mention: ""
+  approverUsergroups:
+    - "S123"
+`);
+assert.equal(yamlConfig.slack.channel, "C0123 # design-review");
+assert.equal(
+  yamlConfig.github.rejectComment,
+  "@claude make the following changes:\n\n{review_comment}\n",
+);
+
 console.log("core selftest passed");

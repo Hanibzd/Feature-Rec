@@ -33,3 +33,6 @@ jobs:
         with:
           config: .github/feature-rec-config.yaml
           api-url: ${{ vars.FEATURE_REC_API_URL }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          FEATURE_REC_RUNNER_TOKEN: ${{ secrets.FEATURE_REC_RUNNER_TOKEN }}

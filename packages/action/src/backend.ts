@@ -2,11 +2,16 @@ import fs from "node:fs";
 import type { ClassifierResult, FeatureRecConfig, RunStartRequest } from "@feature-rec/core";
 import { RunStartResponseSchema } from "@feature-rec/core";
 
-function headers(): HeadersInit {
+function runnerToken(): string {
   const token = process.env.FEATURE_REC_RUNNER_TOKEN;
+  if (!token) throw new Error("FEATURE_REC_RUNNER_TOKEN is required to call the Feature-Rec backend.");
+  return token;
+}
+
+function headers(): HeadersInit {
   return {
     "Content-Type": "application/json",
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    Authorization: `Bearer ${runnerToken()}`,
   };
 }
 
@@ -42,12 +47,11 @@ export async function failCycle(apiUrl: string, cycleId: string, message: string
 }
 
 export async function uploadVideo(apiUrl: string, cycleId: string, file: string): Promise<void> {
-  const token = process.env.FEATURE_REC_RUNNER_TOKEN;
   const response = await fetch(`${apiUrl}/api/runs/${cycleId}/video`, {
     method: "POST",
     headers: {
       "Content-Type": "application/octet-stream",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      Authorization: `Bearer ${runnerToken()}`,
     },
     body: new Blob([new Uint8Array(fs.readFileSync(file))]),
   });

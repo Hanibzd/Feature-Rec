@@ -8,7 +8,6 @@ export type ServiceEnv = {
   githubToken: string;
   githubAppId: string;
   githubPrivateKey: string;
-  githubWebhookSecret: string;
   slackBotToken: string;
   slackSigningSecret: string;
 };
@@ -22,7 +21,6 @@ export function readEnv(env = process.env): ServiceEnv {
     githubToken: env.FEATURE_REC_GITHUB_TOKEN ?? env.GITHUB_TOKEN ?? "",
     githubAppId: env.GITHUB_APP_ID ?? "",
     githubPrivateKey: (env.GITHUB_PRIVATE_KEY ?? "").replace(/\\n/g, "\n"),
-    githubWebhookSecret: env.GITHUB_WEBHOOK_SECRET ?? "",
     slackBotToken: env.SLACK_BOT_TOKEN ?? "",
     slackSigningSecret: env.SLACK_SIGNING_SECRET ?? "",
   };

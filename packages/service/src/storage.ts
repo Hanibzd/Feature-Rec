@@ -20,7 +20,6 @@ export type CycleStore = {
   updateCheckRun(id: string, checkRunId: number): void;
   updateStatus(id: string, status: ReviewCycleStatus): void;
   updateSlackMessage(id: string, channelId: string, messageTs: string): void;
-  hasProcessedInteraction(id: string): boolean;
   recordProcessedInteraction(id: string, cycleId: string): boolean;
   close(): void;
 };

@@ -10,6 +10,11 @@ function now(): string {
   return new Date().toISOString();
 }
 
+function isProcessedInteractionDuplicate(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : "";
+  return message.includes("UNIQUE constraint failed: processed_interactions.id");
+}
+
 function rowToCycle(row: Record<string, unknown>): CycleRecord {
   return {
     id: String(row.id),
@@ -116,22 +121,29 @@ export class SqliteCycleStore implements CycleStore {
     prNumber: number;
     exceptHeadSha: string;
   }): CycleRecord[] {
-    const rows = this.#db
-      .prepare(
-        `select * from review_cycles
-         where owner = ? and repo = ? and pr_number = ? and head_sha != ?
-         and status in ('analyzing', 'pending_validation')`,
-      )
-      .all(input.owner, input.repo, input.prNumber, input.exceptHeadSha) as Record<string, unknown>[];
-    const t = now();
-    this.#db
-      .prepare(
-        `update review_cycles set status = 'superseded', updated_at = ?
-         where owner = ? and repo = ? and pr_number = ? and head_sha != ?
-         and status in ('analyzing', 'pending_validation')`,
-      )
-      .run(t, input.owner, input.repo, input.prNumber, input.exceptHeadSha);
-    return rows.map(rowToCycle);
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.#db
+        .prepare(
+          `select * from review_cycles
+           where owner = ? and repo = ? and pr_number = ? and head_sha != ?
+           and status in ('analyzing', 'pending_validation')`,
+        )
+        .all(input.owner, input.repo, input.prNumber, input.exceptHeadSha) as Record<string, unknown>[];
+      const t = now();
+      this.#db
+        .prepare(
+          `update review_cycles set status = 'superseded', updated_at = ?
+           where owner = ? and repo = ? and pr_number = ? and head_sha != ?
+           and status in ('analyzing', 'pending_validation')`,
+        )
+        .run(t, input.owner, input.repo, input.prNumber, input.exceptHeadSha);
+      this.#db.exec("COMMIT");
+      return rows.map(rowToCycle);
+    } catch (err) {
+      this.#db.exec("ROLLBACK");
+      throw err;
+    }
   }
 
   updateCheckRun(id: string, checkRunId: number): void {
@@ -154,19 +166,14 @@ export class SqliteCycleStore implements CycleStore {
       .run(channelId, messageTs, now(), id);
   }
 
-  hasProcessedInteraction(id: string): boolean {
-    return Boolean(
-      this.#db.prepare("select id from processed_interactions where id = ?").get(id),
-    );
-  }
-
   recordProcessedInteraction(id: string, cycleId: string): boolean {
     try {
       this.#db
         .prepare("insert into processed_interactions (id, cycle_id, created_at) values (?, ?, ?)")
         .run(id, cycleId, now());
       return true;
-    } catch {
+    } catch (err) {
+      if (!isProcessedInteractionDuplicate(err)) throw err;
       return false;
     }
   }

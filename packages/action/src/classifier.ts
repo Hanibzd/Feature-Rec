@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { ClassifierResultSchema, type ClassifierResult } from "@feature-rec/core";
 import { heuristicFrontendVisible } from "./diff";
 
-function extractJson(text: string): unknown {
+export function extractClassifierJson(text: string): unknown {
   const stripped = text.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
   const start = stripped.indexOf("{");
   const end = stripped.lastIndexOf("}");
@@ -16,7 +16,13 @@ export async function classifyFrontendVisible(input: {
   prTitle: string;
 }): Promise<ClassifierResult> {
   if (!process.env.ANTHROPIC_API_KEY) {
-    return ClassifierResultSchema.parse(heuristicFrontendVisible(input.files, input.patch));
+    const heuristic = ClassifierResultSchema.parse(heuristicFrontendVisible(input.files, input.patch));
+    if (heuristic.frontendVisible && process.env.FEATURE_REC_ALLOW_HEURISTIC_CLASSIFIER !== "1") {
+      throw new Error(
+        "ANTHROPIC_API_KEY is required to classify frontend-visible changes. Set FEATURE_REC_ALLOW_HEURISTIC_CLASSIFIER=1 to use the conservative heuristic fallback.",
+      );
+    }
+    return heuristic;
   }
 
   const client = new Anthropic();
@@ -63,5 +69,5 @@ ${input.patch}
     .map((block) => (block.type === "text" ? block.text : ""))
     .join("")
     .trim();
-  return ClassifierResultSchema.parse(extractJson(raw));
+  return ClassifierResultSchema.parse(extractClassifierJson(raw));
 }

@@ -5,6 +5,15 @@ import type { CycleRecord } from "./storage";
 
 type SlackResponse<T> = T & { ok: boolean; error?: string };
 
+function timingSafeStringEqual(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left);
+  const rightBytes = Buffer.from(right);
+  return (
+    leftBytes.byteLength === rightBytes.byteLength &&
+    crypto.timingSafeEqual(leftBytes, rightBytes)
+  );
+}
+
 async function slackApi<T>(
   env: ServiceEnv,
   method: string,
@@ -30,7 +39,7 @@ export function verifySlackSignature(input: {
   signature: string | undefined;
   rawBody: string;
 }): boolean {
-  if (!input.signingSecret) return true;
+  if (!input.signingSecret) return false;
   if (!input.timestamp || !input.signature) return false;
   const age = Math.abs(Date.now() / 1000 - Number(input.timestamp));
   if (!Number.isFinite(age) || age > 60 * 5) return false;
@@ -39,7 +48,7 @@ export function verifySlackSignature(input: {
     .createHmac("sha256", input.signingSecret)
     .update(base)
     .digest("hex")}`;
-  return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(input.signature));
+  return timingSafeStringEqual(digest, input.signature);
 }
 
 function actionValue(payload: SlackApprovalPayload): string {
@@ -131,6 +140,22 @@ export class SlackClient {
       blocks: validationBlocks(config, cycle),
     });
     return { channel: message.channel, ts: message.ts };
+  }
+
+  async isApprover(config: FeatureRecConfig, userId: string | undefined): Promise<boolean> {
+    const usergroups = config.slack.approverUsergroups;
+    if (usergroups.length === 0) return true;
+    if (!userId) return false;
+
+    const memberships = await Promise.all(
+      usergroups.map((usergroup) =>
+        slackApi<{ users: string[] }>(this.#env, "usergroups.users.list", {
+          usergroup,
+          include_disabled: false,
+        }),
+      ),
+    );
+    return memberships.some((membership) => membership.users.includes(userId));
   }
 
   async finalize(

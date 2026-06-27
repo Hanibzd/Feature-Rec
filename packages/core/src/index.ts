@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 
 export const FeatureRecConfigSchema = z.object({
@@ -108,54 +109,8 @@ export function isAllowedPullRequestEvent(event: {
   return action === "opened" || action === "ready_for_review" || action === "synchronize";
 }
 
-function parseScalar(raw: string): unknown {
-  const value = raw.trim();
-  if (value === "1") return 1;
-  if (value === "true") return true;
-  if (value === "false") return false;
-  if (value.startsWith("[") && value.endsWith("]")) {
-    const inner = value.slice(1, -1).trim();
-    if (!inner) return [];
-    return inner.split(",").map((part) => String(parseScalar(part.trim())));
-  }
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1).replace(/\\n/g, "\n");
-  }
-  return value.replace(/\\n/g, "\n");
-}
-
-/**
- * Tiny YAML parser for the documented Feature-Rec config shape.
- * It intentionally supports only nested maps and bracket arrays used by v1.
- */
 export function parseFeatureRecConfig(source: string): FeatureRecConfig {
-  const root: Record<string, unknown> = {};
-  let current: Record<string, unknown> | null = root;
-  for (const rawLine of source.split(/\r?\n/)) {
-    const noComment = rawLine.replace(/\s+#.*$/, "");
-    if (!noComment.trim()) continue;
-    const indent = noComment.match(/^ */)?.[0].length ?? 0;
-    const match = noComment.trim().match(/^([^:]+):(.*)$/);
-    if (!match) continue;
-    const key = match[1].trim();
-    const value = match[2] ?? "";
-    if (indent === 0) {
-      if (!value.trim()) {
-        const child: Record<string, unknown> = {};
-        root[key] = child;
-        current = child;
-      } else {
-        root[key] = parseScalar(value);
-        current = root;
-      }
-    } else if (current) {
-      current[key] = parseScalar(value);
-    }
-  }
-  return FeatureRecConfigSchema.parse(root);
+  return FeatureRecConfigSchema.parse(parseYaml(source) ?? {});
 }
 
 export function loadFeatureRecConfig(path: string): FeatureRecConfig {

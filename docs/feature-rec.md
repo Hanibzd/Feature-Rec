@@ -30,6 +30,7 @@ Set the demo repository variable:
 
 ```text
 FEATURE_REC_API_URL=https://<ngrok-host>
+FEATURE_REC_RUNNER_TOKEN=<shared secret matching the backend env>
 ```
 
 ## GitHub App
@@ -42,19 +43,14 @@ Create a GitHub App with:
 - Contents: read
 - Metadata: read
 
-Configure:
-
-```text
-Webhook URL: https://<ngrok-host>/api/github/webhook
-```
-
 Set local env vars:
 
 ```bash
 GITHUB_APP_ID=...
 GITHUB_PRIVATE_KEY='-----BEGIN RSA PRIVATE KEY-----...'
-GITHUB_WEBHOOK_SECRET=...
 ```
+
+Feature-Rec is driven by the GitHub Action. The backend does not consume GitHub webhooks.
 
 For quick local testing, `FEATURE_REC_GITHUB_TOKEN` can be used as a fallback, but the intended demo path is the GitHub App.
 
@@ -80,7 +76,7 @@ SLACK_BOT_TOKEN=xoxb-...
 SLACK_SIGNING_SECRET=...
 ```
 
-Invite the bot to the configured channel.
+Invite the bot to the configured channel. If `slack.approverUsergroups` is set in the config, only users in one of those Slack usergroups can approve or request changes.
 
 ## Demo Repo Setup
 
@@ -94,6 +90,8 @@ Set the LLM secret used by the action:
 ```text
 ANTHROPIC_API_KEY=...
 ```
+
+Without `ANTHROPIC_API_KEY`, Feature-Rec only auto-accepts diffs that do not look frontend-visible. To use the conservative filename-based fallback for frontend-looking diffs, set `FEATURE_REC_ALLOW_HEURISTIC_CLASSIFIER=1`.
 
 Set branch protection to require the `Feature-Rec` Check Run, not the GitHub Actions workflow job.
 
