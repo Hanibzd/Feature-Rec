@@ -13,7 +13,9 @@
     "render": "pnpm --filter @autodemo/cli run render",
     "publish": "pnpm --filter @autodemo/cli run publish",
     "studio": "pnpm --filter @autodemo/video run studio",
-    "typecheck": "pnpm -r run typecheck"
+    "typecheck": "pnpm -r run typecheck",
+    "feature-rec:service": "pnpm --filter @feature-rec/service run dev",
+    "feature-rec:selftest": "pnpm --filter @feature-rec/core run selftest && pnpm --filter @feature-rec/service run selftest && pnpm --filter @feature-rec/action run selftest"
   },
   "devDependencies": {
     "typescript": "^5.7.3"

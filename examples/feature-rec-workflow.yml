@@ -1,0 +1,38 @@
+name: Feature-Rec
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+  id-token: write
+
+concurrency:
+  group: feature-rec-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  feature-rec:
+    if: >
+      github.event.pull_request.state == 'open' &&
+      github.event.pull_request.draft == false &&
+      (
+        github.event.action == 'opened' ||
+        github.event.action == 'ready_for_review' ||
+        github.event.action == 'synchronize'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: MathFreedom/Agora/packages/action@codex/feature-rec
+        with:
+          config: .github/feature-rec-config.yaml
+          api-url: ${{ vars.FEATURE_REC_API_URL }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          FEATURE_REC_RUNNER_TOKEN: ${{ secrets.FEATURE_REC_RUNNER_TOKEN }}
