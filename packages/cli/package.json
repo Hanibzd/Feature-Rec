@@ -6,6 +6,9 @@
   "bin": {
     "autodemo": "src/index.ts"
   },
+  "exports": {
+    "./feature-rec": "./src/feature-rec.ts"
+  },
   "scripts": {
     "generate": "tsx src/index.ts generate",
     "render": "tsx src/index.ts render",
