@@ -16,6 +16,7 @@ the loop, from `git push` to a published video.
 - [What you get](#what-you-get)
 - [Why this is different](#why-this-is-different)
 - [How it works](#how-it-works)
+- [Feature-Rec: Slack validation for PRs](#feature-rec-slack-validation-for-prs)
 - [Quickstart](#quickstart)
 - [Commands](#commands)
 - [Project structure](#project-structure)
@@ -48,6 +49,10 @@ pnpm demo
 5. a **branded outro**.
 
 Plus `out/CHANGELOG.md` and `out/pr-comment.md` ready to publish.
+
+The repo also ships **Feature-Rec**, a PR validation workflow that uses AutoDemo as its video
+engine: a GitHub Action classifies frontend-visible PR changes, renders an MP4 for qualifying
+changes, posts it to Slack, and gates the `Feature-Rec` Check Run on product approval.
 
 Two example features ship in the repo and render out of the box:
 
@@ -122,6 +127,45 @@ components; the DemoPlan holds only ids + props, so it can be passed to Remotion
 
 ---
 
+## Feature-Rec: Slack validation for PRs
+
+Feature-Rec turns frontend-visible PRs into a Slack review loop:
+
+```
+ PR opened / ready / updated
+      │
+      ▼
+ GitHub Action ──► classify diff ──► render AutoDemo MP4 ──► Slack buttons
+      │                                                        │
+      ├─ no frontend-visible change ──────────────────────────► accept check
+      │                                                        │
+      └─ request changes modal ──► GitHub PR comment ──► reject check
+```
+
+The workflow has three packages plus one AutoDemo adapter:
+
+| Package | Purpose |
+| --- | --- |
+| `@feature-rec/core` | Shared config, schemas, cycle keys, and template helpers. |
+| `@feature-rec/action` | Composite GitHub Action entrypoint: reads the PR event, classifies the diff, renders video, and calls the backend. |
+| `@feature-rec/service` | Local Fastify backend with SQLite storage, GitHub Check Run updates, Slack upload, buttons, and request-changes modal handling. |
+| `@autodemo/cli/feature-rec` | Exported adapter that converts extracted PR TSX/JSX sources into the existing AutoDemo render pipeline. |
+
+The intended demo setup is:
+
+1. Run the backend locally with `pnpm feature-rec:service`.
+2. Expose it with a tunnel and set `FEATURE_REC_API_URL` plus `FEATURE_REC_RUNNER_TOKEN` in the
+   target repository.
+3. Copy `examples/feature-rec-config.yaml` and `examples/feature-rec-workflow.yml` into the target
+   repository under `.github/`.
+4. Configure the Slack app, GitHub App, and `ANTHROPIC_API_KEY`.
+5. Require the `Feature-Rec` Check Run in branch protection.
+
+See [`docs/feature-rec.md`](docs/feature-rec.md) for the complete setup, permissions, and smoke
+checks.
+
+---
+
 ## Quickstart
 
 **Requirements:** Node ≥ 20 and pnpm. Google Chrome / a headless shell is downloaded automatically
@@ -177,7 +221,9 @@ All run from the repo root. Arguments after the command are forwarded to the CLI
 | `pnpm publish` | Write `out/CHANGELOG.md` + `out/pr-comment.md` |
 | `pnpm publish --post` | …and post the comment via the `gh` CLI (needs a PR number) |
 | `pnpm studio` | Open the Remotion Studio for live preview |
-| `pnpm typecheck` | `tsc --noEmit` across both packages |
+| `pnpm typecheck` | `tsc --noEmit` across all workspace packages |
+| `pnpm feature-rec:service` | Start the local Feature-Rec backend on `PORT` or 3000 |
+| `pnpm feature-rec:selftest` | Run self-tests for core, service, and action packages |
 
 > If a flag doesn't seem to take effect through `pnpm <script> --flag`, use the explicit form:
 > `pnpm <script> -- --flag` (both work — a stray `--` is stripped by the CLI).
@@ -200,6 +246,9 @@ autodemo/
 │  └─ invite-members/{before,after}.tsx + meta.json
 │
 ├─ packages/
+│  ├─ core/   (@feature-rec/core)      # Feature-Rec schemas, config parsing, helpers
+│  ├─ action/ (@feature-rec/action)    # composite GitHub Action runner
+│  ├─ service/(@feature-rec/service)   # Fastify + Slack/GitHub integration backend
 │  ├─ video/  (@autodemo/video)       # the Remotion project
 │  │  ├─ remotion.config.ts           #   enables Tailwind for the Remotion CLI/Studio
 │  │  └─ src/
@@ -222,6 +271,7 @@ autodemo/
 │     │  ├─ scenes.ts                 #   write scene files + regenerate the registry
 │     │  ├─ render.ts                 #   bundle + renderMedia (muted)
 │     │  ├─ publish.ts                #   changelog + PR comment
+│     │  ├─ feature-rec.ts            #   Feature-Rec adapter into the render pipeline
 │     │  ├─ stills.ts                 #   dev helper: render frames to PNG for QA
 │     │  └─ agent/
 │     │     ├─ index.ts               #   replicate(): API path → offline fallback
@@ -231,6 +281,11 @@ autodemo/
 │     │     └─ offline.ts             #   the known-good scene set
 │     └─ scripts/validate-selftest.mts#   self-test for the validation logic
 │
+├─ docs/
+│  └─ feature-rec.md                  # Feature-Rec setup guide
+├─ examples/
+│  ├─ feature-rec-config.yaml         # target repo config
+│  └─ feature-rec-workflow.yml        # target repo GitHub Actions workflow
 └─ out/                               # demo.mp4, plan.json, CHANGELOG.md, frames/  (gitignored)
 ```
 
@@ -320,6 +375,22 @@ Environment variables (optional — copy `.env.example` or just `export`):
 | `AUTODEMO_MODEL` | `claude-sonnet-4-6` | Model used for replication. |
 | `AUTODEMO_MAX_TOKENS` | `16000` | Output token ceiling for the agent. |
 
+Feature-Rec service and action variables:
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `FEATURE_REC_API_URL` | — | Public URL of the Feature-Rec backend, used by the GitHub Action. |
+| `FEATURE_REC_BASE_URL` | `http://localhost:3000` | Backend base URL used when constructing Slack/GitHub links. |
+| `FEATURE_REC_DB_PATH` | `./data/feature-rec.sqlite` | SQLite database path for review cycles. |
+| `FEATURE_REC_RUNNER_TOKEN` | — | Shared secret between the action and backend. |
+| `FEATURE_REC_GITHUB_TOKEN` | — | Local testing fallback for GitHub writes. Prefer a GitHub App for the demo path. |
+| `GITHUB_APP_ID` | — | GitHub App id for Check Runs and PR comments. |
+| `GITHUB_PRIVATE_KEY` | — | GitHub App private key. Escaped `\n` sequences are supported. |
+| `SLACK_BOT_TOKEN` | — | Slack bot token for uploads, messages, and modals. |
+| `SLACK_SIGNING_SECRET` | — | Slack request signing secret for interactivity verification. |
+| `FEATURE_REC_OFFLINE` | — | Set to `1` to force offline AutoDemo rendering from known-good scenes. |
+| `FEATURE_REC_ALLOW_HEURISTIC_CLASSIFIER` | — | Set to `1` to allow filename-based classification when no Anthropic key is available. |
+
 ---
 
 ## Extending: add your own feature
@@ -370,12 +441,13 @@ These are enforced by design and by validation:
 - Two mocks render correctly (toggle slide + button pop); typecheck clean; agent validation
   self-tested; reviewed by a multi-agent adversarial pass (6 findings, all fixed).
 - All hard constraints hold (audio-track probe confirms zero audio).
+- Feature-Rec GitHub Action, Slack validation service, SQLite-backed cycle storage, GitHub Check Run
+  lifecycle, request-changes modal, and smoke self-tests.
 
 **Not wired yet:**
-- **GitHub Action** that runs `autodemo` on a PR (the pipeline exists; only the workflow YAML is
-  missing).
 - **Screenshot fallback** for UIs too complex to reproduce (today the net is `MissingScene`, which
   guarantees a frame is never empty).
+- Hosted Feature-Rec backend; the current demo path expects a local service exposed through a tunnel.
 
 ---
 
@@ -393,6 +465,14 @@ These are enforced by design and by validation:
 - **No video / "No known-good scene" error** — you generated a new fixture without an API key and
   without registering an offline scene. Set `ANTHROPIC_API_KEY`, or add the offline scene (see
   [Extending](#extending-add-your-own-feature)).
+- **Feature-Rec action fails with missing API URL** — set repository variable
+  `FEATURE_REC_API_URL` to the public tunnel URL for the local backend.
+- **Feature-Rec cannot post Check Runs or PR comments** — configure the GitHub App credentials
+  (`GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY`) on the backend, or use `FEATURE_REC_GITHUB_TOKEN` for
+  local-only smoke testing.
+- **Slack buttons do nothing** — set the Slack Interactivity Request URL to
+  `<FEATURE_REC_BASE_URL>/api/slack/interactivity`, expose that URL publicly, and make sure
+  `SLACK_SIGNING_SECRET` matches the app.
 - **A `--flag` is ignored** — use `pnpm <script> -- --flag` (or the explicit
   `pnpm --filter @autodemo/cli exec tsx src/index.ts <cmd> --flag`).
 
@@ -402,6 +482,7 @@ These are enforced by design and by validation:
 
 TypeScript · Node 20+ · pnpm workspaces · **Remotion 4** (`@remotion/bundler`, `@remotion/renderer`,
 `@remotion/tailwind-v4`, `@remotion/google-fonts`) · React 19 · Tailwind v4 ·
-**`@anthropic-ai/sdk`** (model `claude-sonnet-4-6`) · `zod` · `commander`. Test app: Next.js 15.
+**`@anthropic-ai/sdk`** (model `claude-sonnet-4-6`) · `zod` · `commander` · Fastify · SQLite ·
+Slack Web API · GitHub Checks API. Test app: Next.js 15.
 
 <sub>AutoDemo — no humans in the loop, from the diff to the published video.</sub>
