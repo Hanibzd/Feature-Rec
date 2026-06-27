@@ -6,3 +6,6 @@ packages:
 
 pnpm:
   minimumReleaseAge: 0
+
+onlyBuiltDependencies:
+  - esbuild
