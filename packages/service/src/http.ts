@@ -1,7 +1,5 @@
 import Fastify from "fastify";
 import crypto from "node:crypto";
-import fs from "node:fs";
-import { fileURLToPath } from "node:url";
 import {
   buildCycleKey,
   ClassifierResultSchema,
@@ -190,7 +188,8 @@ export function buildServer(input: {
       }
       const cycle = store.getCycle(param(request.params, "cycleId"));
       if (!cycle) return reply.code(404).send({ error: "cycle not found" });
-      const video = fs.readFileSync(fileURLToPath(new URL("../../../../zoom_yc-hackathon-banner.mp4", import.meta.url)));
+      const video = Buffer.isBuffer(request.body) ? request.body : Buffer.from([]);
+      if (video.byteLength === 0) return reply.code(400).send({ error: "empty video body" });
 
       await github.updateCheckRun(cycle, {
         status: "in_progress",
