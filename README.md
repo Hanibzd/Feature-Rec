@@ -5,10 +5,10 @@ Feature-Rec turns product-visible pull request changes into a Slack approval flo
 When a PR is opened, marked ready for review, or updated, the GitHub Action checks whether the diff
 changes user-facing UI. Backend-only, docs-only, test-only, dependency-only, and CI-only changes are
 accepted automatically. If the PR changes the product experience, Feature-Rec renders a short
-Remotion MP4 with AutoDemo, posts it to Slack, and keeps the `Feature-Rec` check pending until an
-approved reviewer chooses `Good to merge` or `Needs changes`.
+Remotion MP4, posts it to Slack, and keeps the `Feature-Rec` check pending until an approved
+reviewer chooses `Good to merge` or `Needs changes`.
 
-AutoDemo is the video engine inside the project. It reads changed UI source, recreates the relevant
+The video renderer is part of Feature-Rec. It reads changed UI source, recreates the relevant
 interface as Remotion components, animates the smallest before-to-after change, and renders a
 deterministic no-audio MP4 without launching the target app.
 
@@ -19,8 +19,7 @@ deterministic no-audio MP4 without launching the target app.
 - Generates a short visual demo for frontend-visible changes.
 - Sends the demo to Slack with product approval buttons.
 - Maps the Slack decision back to GitHub Checks and PR comments.
-- Provides a standalone local AutoDemo pipeline for generating demo videos from fixtures or git
-  diffs.
+- Provides a standalone local renderer pipeline for generating demo videos from fixtures or git diffs.
 
 ## How It Works
 
@@ -29,7 +28,7 @@ ready PR event
   -> GitHub Action
   -> diff classifier
      -> no frontend-visible change: accept the Feature-Rec check
-     -> frontend-visible change: render AutoDemo MP4
+     -> frontend-visible change: render demo MP4
   -> Slack review message
      -> Good to merge: accept the check
      -> Needs changes: post PR feedback and mark the check action required
@@ -39,10 +38,10 @@ The repository is a pnpm monorepo with these main pieces:
 
 | Path | Purpose |
 | --- | --- |
-| `packages/action` | GitHub Action entrypoint. It reads the PR event, classifies the diff, invokes AutoDemo when needed, and calls the backend. |
+| `packages/action` | GitHub Action entrypoint. It reads the PR event, classifies the diff, invokes the video renderer when needed, and calls the backend. |
 | `packages/service` | Fastify backend for Slack uploads, Slack button handling, GitHub Check Runs, PR comments, and SQLite-backed review state. |
 | `packages/core` | Shared schemas, config parsing, template helpers, and action/service contracts. |
-| `packages/cli` | AutoDemo CLI: analyze a UI change, generate or reuse a Remotion scene, render video, and write release artifacts. |
+| `packages/cli` | Renderer CLI: analyze a UI change, generate or reuse a Remotion scene, render video, and write release artifacts. |
 | `packages/video` | Remotion project used to render the generated scenes. |
 | `fixtures` | Example before/after UI changes that can render locally without external setup. |
 | `apps/web` | Small Next.js sample app whose UI code is used by the fixtures. It is not part of the pnpm workspace. |
@@ -77,7 +76,7 @@ cp .env.example .env
 `ANTHROPIC_API_KEY` enables live scene generation. Without it, the bundled fixtures use known-good
 offline scenes so the local demo still works.
 
-## Run AutoDemo Locally
+## Run the Renderer Locally
 
 Render the bundled fixture demos:
 
@@ -85,7 +84,7 @@ Render the bundled fixture demos:
 pnpm demo
 ```
 
-This runs the full AutoDemo pipeline and writes:
+This runs the full renderer pipeline and writes:
 
 - `out/demo.mp4`
 - `out/CHANGELOG.md`
@@ -144,7 +143,7 @@ target repository to start the review loop.
 
 | Command | Description |
 | --- | --- |
-| `pnpm demo` | Generate, render, and publish local AutoDemo artifacts from fixtures. |
+| `pnpm demo` | Generate, render, and publish local demo artifacts from fixtures. |
 | `pnpm generate` | Convert fixtures or a git diff into generated Remotion scenes and `out/plan.json`. |
 | `pnpm generate --git <range>` | Generate scenes from changed TSX/JSX files in a git range. |
 | `pnpm render` | Render the current `out/plan.json` to `out/demo.mp4`. |
