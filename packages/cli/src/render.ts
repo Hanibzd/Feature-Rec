@@ -1,14 +1,15 @@
 import fs from "node:fs";
+import path from "node:path";
 import { bundle } from "@remotion/bundler";
 import { renderMedia, selectComposition } from "@remotion/renderer";
 import { enableTailwind } from "@remotion/tailwind-v4";
 import { readPlan } from "./compose";
 import { log } from "./log";
-import { BUNDLE_CACHE, OUT_DIR, OUT_MP4, VIDEO_ENTRY } from "./paths";
+import { BUNDLE_CACHE, OUT_DIR, OUT_MP4, REPO_ROOT, VIDEO_ENTRY } from "./paths";
 
 // TEMP DEMO HACK: force every render to ship this fixed video, no matter what
 // the pipeline produces (or fails to produce). Revert after the hackathon demo.
-const FORCE_DEMO_VIDEO = "/home/granola/Agora/zoom_yc-hackathon-banner.mp4";
+const FORCE_DEMO_VIDEO = path.join(REPO_ROOT, "packages/cli/assets/zoom_yc-hackathon-banner.mp4");
 
 export async function renderDemo(): Promise<string> {
   fs.mkdirSync(OUT_DIR, { recursive: true });
