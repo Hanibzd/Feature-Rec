@@ -108,14 +108,17 @@ export class SlackClient {
   }
 
   async uploadVideo(config: FeatureRecConfig, cycle: CycleRecord, file: Buffer): Promise<void> {
-    const upload = await slackApi<{ upload_url: string; file_id: string }>(
-      this.#env,
-      "files.getUploadURLExternal",
-      {
-        filename: `feature-rec-${cycle.prNumber}-${cycle.headSha.slice(0, 8)}.mp4`,
-        length: file.byteLength,
-      },
-    );
+    if (!this.#env.slackBotToken) throw new Error("SLACK_BOT_TOKEN is not set.");
+    const params = new URLSearchParams({
+      filename: `feature-rec-${cycle.prNumber}-${cycle.headSha.slice(0, 8)}.mp4`,
+      length: String(file.byteLength),
+    });
+    const uploadUrlResp = await fetch(`https://slack.com/api/files.getUploadURLExternal?${params}`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${this.#env.slackBotToken}` },
+    });
+    const upload = await uploadUrlResp.json() as { ok: boolean; upload_url: string; file_id: string; error?: string };
+    if (!upload.ok) throw new Error(`Slack files.getUploadURLExternal failed: ${upload.error}`);
 
     const uploadResponse = await fetch(upload.upload_url, {
       method: "POST",
