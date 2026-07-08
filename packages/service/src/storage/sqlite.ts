@@ -70,8 +70,8 @@ export class SqliteCycleStore implements CycleStore {
     `);
   }
 
-  upsertCycle(input: RunStartRequest & { cycleKey: string }): CycleRecord {
-    const existing = this.getCycleByKey(input.cycleKey);
+  async upsertCycle(input: RunStartRequest & { cycleKey: string }): Promise<CycleRecord> {
+    const existing = await this.getCycleByKey(input.cycleKey);
     if (existing) return existing;
     const id = crypto.randomUUID();
     const t = now();
@@ -96,31 +96,31 @@ export class SqliteCycleStore implements CycleStore {
         t,
         t,
       );
-    return this.getCycle(id) ?? (() => {
+    return (await this.getCycle(id)) ?? (() => {
       throw new Error("Failed to create review cycle");
     })();
   }
 
-  getCycle(id: string): CycleRecord | null {
+  async getCycle(id: string): Promise<CycleRecord | null> {
     const row = this.#db.prepare("select * from review_cycles where id = ?").get(id) as
       | Record<string, unknown>
       | undefined;
     return row ? rowToCycle(row) : null;
   }
 
-  getCycleByKey(cycleKey: string): CycleRecord | null {
+  async getCycleByKey(cycleKey: string): Promise<CycleRecord | null> {
     const row = this.#db.prepare("select * from review_cycles where cycle_key = ?").get(cycleKey) as
       | Record<string, unknown>
       | undefined;
     return row ? rowToCycle(row) : null;
   }
 
-  markSupersededForPr(input: {
+  async markSupersededForPr(input: {
     owner: string;
     repo: string;
     prNumber: number;
     exceptHeadSha: string;
-  }): CycleRecord[] {
+  }): Promise<CycleRecord[]> {
     this.#db.exec("BEGIN IMMEDIATE");
     try {
       const rows = this.#db
@@ -146,19 +146,19 @@ export class SqliteCycleStore implements CycleStore {
     }
   }
 
-  updateCheckRun(id: string, checkRunId: number): void {
+  async updateCheckRun(id: string, checkRunId: number): Promise<void> {
     this.#db
       .prepare("update review_cycles set check_run_id = ?, updated_at = ? where id = ?")
       .run(checkRunId, now(), id);
   }
 
-  updateStatus(id: string, status: ReviewCycleStatus): void {
+  async updateStatus(id: string, status: ReviewCycleStatus): Promise<void> {
     this.#db
       .prepare("update review_cycles set status = ?, updated_at = ? where id = ?")
       .run(status, now(), id);
   }
 
-  updateSlackMessage(id: string, channelId: string, messageTs: string): void {
+  async updateSlackMessage(id: string, channelId: string, messageTs: string): Promise<void> {
     this.#db
       .prepare(
         "update review_cycles set slack_channel_id = ?, slack_message_ts = ?, updated_at = ? where id = ?",
@@ -166,7 +166,7 @@ export class SqliteCycleStore implements CycleStore {
       .run(channelId, messageTs, now(), id);
   }
 
-  recordProcessedInteraction(id: string, cycleId: string): boolean {
+  async recordProcessedInteraction(id: string, cycleId: string): Promise<boolean> {
     try {
       this.#db
         .prepare("insert into processed_interactions (id, cycle_id, created_at) values (?, ?, ?)")
@@ -178,7 +178,7 @@ export class SqliteCycleStore implements CycleStore {
     }
   }
 
-  close(): void {
+  async close(): Promise<void> {
     this.#db.close();
   }
 }

@@ -38,16 +38,16 @@ const start = {
   config,
 };
 const cycleKey = buildCycleKey(start);
-const one = store.upsertCycle({ ...start, cycleKey });
-const two = store.upsertCycle({ ...start, cycleKey });
+const one = await store.upsertCycle({ ...start, cycleKey });
+const two = await store.upsertCycle({ ...start, cycleKey });
 
 assert.equal(one.id, two.id);
 assert.equal(one.config.slack.channel, "C0123");
-assert.equal(store.recordProcessedInteraction("i1", one.id), true);
-assert.equal(store.recordProcessedInteraction("i1", one.id), false);
-store.updateStatus(one.id, "pending_validation");
-store.updateCheckRun(one.id, 123);
-assert.equal(store.getCycle(one.id)?.status, "pending_validation");
+assert.equal(await store.recordProcessedInteraction("i1", one.id), true);
+assert.equal(await store.recordProcessedInteraction("i1", one.id), false);
+await store.updateStatus(one.id, "pending_validation");
+await store.updateCheckRun(one.id, 123);
+assert.equal((await store.getCycle(one.id))?.status, "pending_validation");
 
 const restrictedConfig = parseFeatureRecConfig(`
 version: 1
@@ -67,12 +67,12 @@ const restrictedStart = {
   configHash: "0123456789abcdea",
   config: restrictedConfig,
 };
-const restricted = store.upsertCycle({
+const restricted = await store.upsertCycle({
   ...restrictedStart,
   cycleKey: buildCycleKey(restrictedStart),
 });
-store.updateStatus(restricted.id, "pending_validation");
-store.updateCheckRun(restricted.id, 124);
+await store.updateStatus(restricted.id, "pending_validation");
+await store.updateCheckRun(restricted.id, 124);
 
 const env: ServiceEnv = {
   port: 0,
@@ -86,7 +86,7 @@ const env: ServiceEnv = {
   slackSigningSecret: "slack-secret",
 };
 
-const cycleForGithub = store.getCycle(one.id);
+const cycleForGithub = await store.getCycle(one.id);
 assert.ok(cycleForGithub);
 const previousFetch = globalThis.fetch;
 const githubCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
@@ -239,10 +239,10 @@ assert.equal(blockResponse.statusCode, 200);
 await new Promise((resolve) => setImmediate(resolve));
 assert.equal(approverChecks, 1);
 assert.equal(accepted, 0);
-assert.equal(store.getCycle(restricted.id)?.status, "pending_validation");
+assert.equal((await store.getCycle(restricted.id))?.status, "pending_validation");
 
 await app.close();
-store.close();
-assert.throws(() => store.recordProcessedInteraction("i2", one.id));
+await store.close();
+await assert.rejects(store.recordProcessedInteraction("i2", one.id));
 
 console.log("service selftest passed");

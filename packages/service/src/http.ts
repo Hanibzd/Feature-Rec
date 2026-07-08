@@ -114,9 +114,9 @@ export function buildServer(input: {
     }
     const start = RunStartRequestSchema.parse(request.body);
     const cycleKey = buildCycleKey(start);
-    const cycle = store.upsertCycle({ ...start, cycleKey });
+    const cycle = await store.upsertCycle({ ...start, cycleKey });
 
-    const superseded = store.markSupersededForPr({
+    const superseded = await store.markSupersededForPr({
       owner: start.owner,
       repo: start.repo,
       prNumber: start.prNumber,
@@ -137,7 +137,7 @@ export function buildServer(input: {
 
     if (!cycle.checkRunId) {
       const checkRunId = await github.createCheckRun({ ...start, cycleKey });
-      store.updateCheckRun(cycle.id, checkRunId);
+      await store.updateCheckRun(cycle.id, checkRunId);
       return { cycleId: cycle.id, cycleKey, checkRunId };
     }
 
@@ -148,7 +148,7 @@ export function buildServer(input: {
     if (!runnerAuthorized(env, request.headers.authorization)) {
       return reply.code(401).send({ error: "unauthorized" });
     }
-    const cycle = store.getCycle(param(request.params, "cycleId"));
+    const cycle = await store.getCycle(param(request.params, "cycleId"));
     if (!cycle) return reply.code(404).send({ error: "cycle not found" });
     await github.updateCheckRun(cycle, {
       conclusion: "success",
@@ -157,7 +157,7 @@ export function buildServer(input: {
         summary: classifierSummary(request.body) || "No frontend-visible validation needed.",
       },
     });
-    store.updateStatus(cycle.id, "accepted");
+    await store.updateStatus(cycle.id, "accepted");
     return { ok: true };
   });
 
@@ -165,7 +165,7 @@ export function buildServer(input: {
     if (!runnerAuthorized(env, request.headers.authorization)) {
       return reply.code(401).send({ error: "unauthorized" });
     }
-    const cycle = store.getCycle(param(request.params, "cycleId"));
+    const cycle = await store.getCycle(param(request.params, "cycleId"));
     if (!cycle) return reply.code(404).send({ error: "cycle not found" });
     const body = request.body as { message?: string } | undefined;
     await github.updateCheckRun(cycle, {
@@ -175,7 +175,7 @@ export function buildServer(input: {
         summary: body?.message ?? "Feature-Rec failed.",
       },
     });
-    store.updateStatus(cycle.id, "failed");
+    await store.updateStatus(cycle.id, "failed");
     return { ok: true };
   });
 
@@ -186,7 +186,7 @@ export function buildServer(input: {
       if (!runnerAuthorized(env, request.headers.authorization)) {
         return reply.code(401).send({ error: "unauthorized" });
       }
-      const cycle = store.getCycle(param(request.params, "cycleId"));
+      const cycle = await store.getCycle(param(request.params, "cycleId"));
       if (!cycle) return reply.code(404).send({ error: "cycle not found" });
       const video = Buffer.isBuffer(request.body) ? request.body : Buffer.from([]);
       if (video.byteLength === 0) return reply.code(400).send({ error: "empty video body" });
@@ -198,11 +198,11 @@ export function buildServer(input: {
           summary: "Frontend-visible change rendered and sent to Slack for validation.",
         },
       });
-      store.updateStatus(cycle.id, "pending_validation");
+      await store.updateStatus(cycle.id, "pending_validation");
 
       await slack.uploadVideo(cycle.config, cycle, video);
       const message = await slack.postValidation(cycle.config, cycle);
-      store.updateSlackMessage(cycle.id, message.channel, message.ts);
+      await store.updateSlackMessage(cycle.id, message.channel, message.ts);
       return { ok: true, channel: message.channel, ts: message.ts };
     },
   );
@@ -247,13 +247,13 @@ export function buildServer(input: {
     const value = SlackApprovalPayloadSchema.parse(JSON.parse(action?.value ?? "{}"));
     const interactionId = `block:${payload.trigger_id ?? ""}:${action?.action_ts ?? ""}:${value.action}`;
 
-    const cycle = store.getCycle(value.cycleId);
+    const cycle = await store.getCycle(value.cycleId);
     if (!cycle) return;
     if (!(await slack.isApprover(cycle.config, payload.user?.id))) {
       app.log.warn({ cycleId: cycle.id, slackUserId: payload.user?.id }, "unauthorized Slack approver");
       return;
     }
-    if (!store.recordProcessedInteraction(interactionId, value.cycleId)) return;
+    if (!(await store.recordProcessedInteraction(interactionId, value.cycleId))) return;
     if (cycle.status === "superseded" || cycle.headSha !== value.headSha) {
       await slack.finalize(cycle, "superseded", "This validation request is stale.");
       return;
@@ -261,7 +261,7 @@ export function buildServer(input: {
 
     if (value.action === "accept") {
       await github.accept(cycle, cycle.config.github.acceptComment);
-      store.updateStatus(cycle.id, "accepted");
+      await store.updateStatus(cycle.id, "accepted");
       await slack.finalize(cycle, "accepted", "Validation passed.");
       return;
     }
@@ -275,19 +275,19 @@ export function buildServer(input: {
     const meta = JSON.parse(payload.view?.private_metadata ?? "{}") as { cycleId?: string; headSha?: string };
     const cycleId = meta.cycleId ?? "";
     const interactionId = `view:${payload.view?.id ?? ""}:${payload.view?.hash ?? ""}`;
-    const cycle = store.getCycle(cycleId);
+    const cycle = await store.getCycle(cycleId);
     if (!cycle) return;
     if (!(await slack.isApprover(cycle.config, payload.user?.id))) {
       app.log.warn({ cycleId: cycle.id, slackUserId: payload.user?.id }, "unauthorized Slack approver");
       return;
     }
-    if (!store.recordProcessedInteraction(interactionId, cycleId)) return;
+    if (!(await store.recordProcessedInteraction(interactionId, cycleId))) return;
     if (cycle.status === "superseded" || cycle.headSha !== meta.headSha) {
       await slack.finalize(cycle, "superseded", "This validation request is stale.");
       return;
     }
     await github.reject(cycle, cycle.config.github.rejectComment, comment.trim());
-    store.updateStatus(cycle.id, "rejected");
+    await store.updateStatus(cycle.id, "rejected");
     await slack.finalize(cycle, "rejected", comment.trim());
   }
 

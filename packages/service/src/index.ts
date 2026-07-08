@@ -9,7 +9,7 @@ const server = buildServer({ env, store });
 
 const close = async () => {
   await server.close();
-  store.close();
+  await store.close();
 };
 
 process.once("SIGINT", () => {

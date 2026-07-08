@@ -8,18 +8,18 @@ export type CycleRecord = ReviewCycle & {
 };
 
 export type CycleStore = {
-  upsertCycle(input: RunStartRequest & { cycleKey: string }): CycleRecord;
-  getCycle(id: string): CycleRecord | null;
-  getCycleByKey(cycleKey: string): CycleRecord | null;
+  upsertCycle(input: RunStartRequest & { cycleKey: string }): Promise<CycleRecord>;
+  getCycle(id: string): Promise<CycleRecord | null>;
+  getCycleByKey(cycleKey: string): Promise<CycleRecord | null>;
   markSupersededForPr(input: {
     owner: string;
     repo: string;
     prNumber: number;
     exceptHeadSha: string;
-  }): CycleRecord[];
-  updateCheckRun(id: string, checkRunId: number): void;
-  updateStatus(id: string, status: ReviewCycleStatus): void;
-  updateSlackMessage(id: string, channelId: string, messageTs: string): void;
-  recordProcessedInteraction(id: string, cycleId: string): boolean;
-  close(): void;
+  }): Promise<CycleRecord[]>;
+  updateCheckRun(id: string, checkRunId: number): Promise<void>;
+  updateStatus(id: string, status: ReviewCycleStatus): Promise<void>;
+  updateSlackMessage(id: string, channelId: string, messageTs: string): Promise<void>;
+  recordProcessedInteraction(id: string, cycleId: string): Promise<boolean>;
+  close(): Promise<void>;
 };
