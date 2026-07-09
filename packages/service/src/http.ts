@@ -142,8 +142,10 @@ export function buildServer(input: {
     // cycle's errors are caught and logged, so the Promise.all cannot reject.
     void Promise.all(
       result.superseded.map(async (oldCycle) => {
-        try {
-          await withRetry(() =>
+        // GitHub and Slack repairs are independent: neither gates the other,
+        // so a GitHub outage can't leave live Slack buttons (or vice versa).
+        const [gh, sl] = await Promise.allSettled([
+          withRetry(() =>
             github.updateCheckRun(oldCycle, {
               conclusion: "neutral",
               output: {
@@ -151,14 +153,21 @@ export function buildServer(input: {
                 summary: `Superseded by a newer PR head SHA: ${start.headSha}.`,
               },
             }),
-          );
-          await withRetry(() =>
+          ),
+          withRetry(() =>
             slack.finalize(oldCycle, "superseded", "A newer commit started a fresh validation cycle."),
-          );
-        } catch (err) {
+          ),
+        ]);
+        if (gh.status === "rejected") {
           request.log.warn(
-            { err, supersededCycleId: oldCycle.id },
-            "best-effort finalize of superseded cycle failed",
+            { err: gh.reason, supersededCycleId: oldCycle.id },
+            "best-effort check-run neutralize of superseded cycle failed",
+          );
+        }
+        if (sl.status === "rejected") {
+          request.log.warn(
+            { err: sl.reason, supersededCycleId: oldCycle.id },
+            "best-effort Slack finalize of superseded cycle failed",
           );
         }
       }),
@@ -191,16 +200,30 @@ export function buildServer(input: {
     if (statusAfterAttach === "superseded") {
       // A newer head superseded us between the transaction and the attach; its
       // neutralize loop saw check_run_id = null, so neutralize what we created.
-      await github.updateCheckRun(
-        { owner: start.owner, repo: start.repo, checkRunId },
-        {
-          conclusion: "neutral",
-          output: {
-            title: "Feature-Rec: superseded",
-            summary: "Superseded by a newer PR head SHA before validation started.",
-          },
-        },
-      );
+      // Best-effort with retry: a transient PATCH failure must not 500 this
+      // request — the runner's start already effectively lost (its results will
+      // no-op as stale), and a retried /start would exit duplicate without
+      // repairing. Now that the ID is attached, a later superseding head can
+      // also see and neutralize it, so a dropped repair here isn't permanent.
+      try {
+        await withRetry(() =>
+          github.updateCheckRun(
+            { owner: start.owner, repo: start.repo, checkRunId },
+            {
+              conclusion: "neutral",
+              output: {
+                title: "Feature-Rec: superseded",
+                summary: "Superseded by a newer PR head SHA before validation started.",
+              },
+            },
+          ),
+        );
+      } catch (err) {
+        request.log.warn(
+          { err, cycleId: result.cycle.id, checkRunId },
+          "best-effort neutralize of own superseded check run failed",
+        );
+      }
     }
 
     return {
@@ -370,8 +393,13 @@ export function buildServer(input: {
       if (!accepted) return;
       // No withRetry around accept: the comment POST inside is not idempotent;
       // the check-run PATCH retries internally (see GitHubClient.accept).
-      await github.accept(accepted, accepted.config.github.acceptComment);
-      await withRetry(() => slack.finalize(accepted, "accepted", "Validation passed."));
+      // GitHub and Slack effects run independently: the DB already settled the
+      // cycle, so a GitHub failure must not skip the Slack finalize (live
+      // buttons on a decided cycle), nor vice versa.
+      await settleSideEffects(accepted.id, [
+        ["github accept", github.accept(accepted, accepted.config.github.acceptComment)],
+        ["slack finalize", withRetry(() => slack.finalize(accepted, "accepted", "Validation passed."))],
+      ]);
       return;
     }
 
@@ -399,9 +427,23 @@ export function buildServer(input: {
     });
     if (!rejected) return;
     // No withRetry around reject: comment POST is not idempotent; the check-run
-    // PATCH retries internally (see GitHubClient.reject).
-    await github.reject(rejected, rejected.config.github.rejectComment, comment.trim());
-    await withRetry(() => slack.finalize(rejected, "rejected", comment.trim()));
+    // PATCH retries internally (see GitHubClient.reject). GitHub and Slack
+    // effects run independently (see accept path for rationale).
+    await settleSideEffects(rejected.id, [
+      ["github reject", github.reject(rejected, rejected.config.github.rejectComment, comment.trim())],
+      ["slack finalize", withRetry(() => slack.finalize(rejected, "rejected", comment.trim()))],
+    ]);
+  }
+
+  // Runs post-commit side effects independently and logs each failure without
+  // letting one channel's outage suppress the other's repair.
+  async function settleSideEffects(cycleId: string, effects: Array<[string, Promise<unknown>]>): Promise<void> {
+    const results = await Promise.allSettled(effects.map(([, p]) => p));
+    results.forEach((res, i) => {
+      if (res.status === "rejected") {
+        app.log.warn({ err: res.reason, cycleId, effect: effects[i][0] }, "post-commit side effect failed");
+      }
+    });
   }
 
   return app;

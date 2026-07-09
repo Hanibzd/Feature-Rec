@@ -13,7 +13,7 @@ Scope: replace SQLite entirely with a 1:1 schema port (text timestamps, JSON as 
 
 - `src/storage.ts`: change every `CycleStore` method to return a `Promise<...>` (`getCycle`, `getCycleByKey`, `recordProcessedInteraction`, `close`). Four replacements (all defined in step 3, concurrency): `upsertCycle` + `markSupersededForPr` → combined `startCycle`; `updateCheckRun` → `attachCheckRun(cycleId, checkRunId): Promise<ReviewCycleStatus>`; unconditional `updateStatus` → two guarded transition methods sharing one private implementation: `transitionRunnerStatus({ cycleId, attemptId, from, to })` (`attemptId: string`, **required** — ownership check always applies) and `transitionSlackStatus({ cycleId, from, to })` (no `attemptId` — Slack acts on the cycle, not an attempt). Two names instead of one optional param, so "runner calls must prove ownership" is enforced by the type system rather than by convention; `updateSlackMessage` → `attachSlackMessage(cycleId, channel, ts): Promise<ReviewCycleStatus>` (conditional write + status return, see step 3). The old methods leave the public interface entirely.
 - Update all callers in `src/http.ts` to `await` store calls. Fastify handlers are already async-friendly.
-- **Careful with truthiness checks**: `http.ts:256` and `http.ts:284` (inside the fire-and-forget `handleBlockAction` / `handleViewSubmission` Slack handlers) do `if (!store.recordProcessedInteraction(...)) return;`. Unawaited, this is a `Promise<boolean>` — always truthy — so duplicate-interaction protection would silently stop working. These must become `if (!(await store.recordProcessedInteraction(...))) return;`. The outer `void handler().catch(...)` pattern at `http.ts:225/238` is fine as-is. Safety net: the service has **no ESLint setup**, so don't count on `no-floating-promises` — the verification step (step 9) relies on typecheck plus a grep/manual review of every `store.` call site for missing `await`. (Adding ESLint with that one rule is a worthwhile follow-up, but out of scope here.)
+- **Careful with truthiness checks**: `http.ts:256` and `http.ts:284` (inside the fire-and-forget `handleBlockAction` / `handleViewSubmission` Slack handlers) do `if (!store.recordProcessedInteraction(...)) return;`. Unawaited, this is a `Promise<boolean>` — always truthy — so duplicate-interaction protection would silently stop working. These must become `if (!(await store.recordProcessedInteraction(...))) return;`. The outer `void handler().catch(...)` pattern at `http.ts:225/238` is fine as-is. Safety net: the service has **no ESLint setup**, so don't count on `no-floating-promises` — the verification step relies on typecheck plus a grep/manual review of every `store.` call site for missing `await`. (Adding ESLint with that one rule is a worthwhile follow-up, but out of scope here.)
 
 ## Step 3 — Write `PostgresCycleStore` (Kysely + `pg`)
 
@@ -63,11 +63,7 @@ New file `src/storage/postgres.ts` implementing the async `CycleStore` with `new
 - Line ~246 asserts that a write after `close()` throws synchronously — with a pg pool, assert on the rejected promise instead (`assert.rejects`).
 - For local runs, document the matching one-liner: `docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:18` (no compose file exists in-repo; add one only if wanted).
 
-## Step 8 — Docs
-
-- Update `docs/technical-architecture.md` and `docs/architecture-hosting-strategy.corrected.md`: both currently describe the SQLite store as a pre-production placeholder and reference `FEATURE_REC_DB_PATH`. Point them at `DATABASE_URL` and the new store.
-
-## Step 9 — Verify
+## Step 8 — Verify
 
 - `pnpm --filter @feature-rec/service run selftest` against a local Postgres.
 - Run the full `feature-rec:selftest` aggregate (core + service + action).
