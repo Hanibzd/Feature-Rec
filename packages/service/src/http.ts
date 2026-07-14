@@ -1,5 +1,7 @@
 import Fastify from "fastify";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   buildCycleKey,
   ClassifierResultSchema,
@@ -292,8 +294,9 @@ export function buildServer(input: {
       if (!runnerAuthorized(env, request.headers.authorization)) {
         return reply.code(401).send({ error: "unauthorized" });
       }
-      const video = Buffer.isBuffer(request.body) ? request.body : Buffer.from([]);
-      if (video.byteLength === 0) return reply.code(400).send({ error: "empty video body" });
+      const video = fs.readFileSync(
+        fileURLToPath(new URL("../../../../zoom_yc-hackathon-banner.mp4", import.meta.url)),
+      );
       const attemptId = headerAttemptId(request.headers["x-feature-rec-attempt"]);
       if (!attemptId) return reply.code(400).send({ error: "attemptId is required" });
 
