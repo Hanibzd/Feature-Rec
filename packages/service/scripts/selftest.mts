@@ -477,6 +477,32 @@ try {
     assert.equal(github.createCheckRunCalls, 1);
   }
 
+  // --- Check Run creation failure releases the cycle for a same-head rerun ---
+  {
+    const github = makeGithubStub();
+    const createCheckRun = github.createCheckRun;
+    github.createCheckRun = async (): Promise<number> => {
+      if (github.createCheckRunCalls === 0) {
+        github.createCheckRunCalls += 1;
+        throw new Error("GitHub App credentials are missing");
+      }
+      return createCheckRun();
+    };
+    const app = makeApp(github, makeSlackStub());
+    const start = makeStart(15, { headSha: "retryinit01" });
+
+    const failed = await startRun(app, start);
+    assert.equal(failed.res.statusCode, 500);
+    assert.equal((await store.getCycleByKey(buildCycleKey(start)))?.status, "failed");
+
+    const rerun = await startRun(app, start);
+    assert.equal(rerun.res.statusCode, 200);
+    assert.equal(rerun.body.duplicate, undefined);
+    assert.ok(rerun.body.attemptId);
+    assert.ok(rerun.body.checkRunId);
+    assert.equal(github.createCheckRunCalls, 2);
+  }
+
   // --- (c) stale runner no-op: superseded head A can't post results ---
   {
     const github = makeGithubStub();
