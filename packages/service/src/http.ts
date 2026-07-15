@@ -190,12 +190,25 @@ export function buildServer(input: {
         cycleId: result.cycle.id,
         cycleKey,
         checkRunId: result.cycle.checkRunId,
-        attemptId: result.attemptId ?? undefined,
+        attemptId: result.attemptId,
       };
     }
 
     // Fresh create: only the creator creates the check run, then attaches it atomically.
-    const checkRunId = await github.createCheckRun({ ...start, cycleKey });
+    // If GitHub rejects creation, release this attempt by marking it failed so
+    // a same-head workflow rerun can take over instead of exiting as a duplicate.
+    let checkRunId: number;
+    try {
+      checkRunId = await github.createCheckRun({ ...start, cycleKey });
+    } catch (err) {
+      await store.transitionRunnerStatus({
+        cycleId: result.cycle.id,
+        attemptId: result.attemptId,
+        from: ["analyzing"],
+        to: "failed",
+      });
+      throw err;
+    }
     const statusAfterAttach = await store.attachCheckRun(result.cycle.id, checkRunId);
     if (statusAfterAttach === "superseded") {
       // A newer head superseded us between the transaction and the attach; its
@@ -230,7 +243,7 @@ export function buildServer(input: {
       cycleId: result.cycle.id,
       cycleKey,
       checkRunId,
-      attemptId: result.attemptId ?? undefined,
+      attemptId: result.attemptId,
     };
   });
 
