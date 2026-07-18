@@ -8,11 +8,6 @@ export const FeatureRecConfigSchema = z.object({
   github: z.object({
     checkName: z.string().min(1).default("Feature-Rec"),
     mention: z.string().default("@claude"),
-    acceptComment: z.string().min(1).default("@{pr_author} validation passed; you can merge."),
-    rejectComment: z
-      .string()
-      .min(1)
-      .default("{mention} make the following changes:\n\n{review_comment}"),
   }),
   slack: z.object({
     channel: z.string().min(1),
@@ -119,6 +114,9 @@ export function parseFeatureRecConfig(source: string): FeatureRecConfig {
 export function loadFeatureRecConfig(path: string): FeatureRecConfig {
   return parseFeatureRecConfig(fs.readFileSync(path, "utf8"));
 }
+
+export const GITHUB_ACCEPT_COMMENT = "@{pr_author} validation passed; you can merge.";
+export const GITHUB_REJECT_COMMENT = "{mention} make the following changes:\n\n{review_comment}";
 
 export function renderTemplate(template: string, values: Record<string, string>): string {
   return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key: string) => values[key] ?? "");

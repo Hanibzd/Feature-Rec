@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import type { RunStartRequest } from "@feature-rec/core";
-import { renderTemplate } from "@feature-rec/core";
+import { GITHUB_ACCEPT_COMMENT, GITHUB_REJECT_COMMENT, renderTemplate } from "@feature-rec/core";
 import type { ServiceEnv } from "./env";
 import { withRetry } from "./retry";
 import type { CycleRecord } from "./storage";
@@ -156,10 +156,10 @@ export class GitHubClient {
   // Retry policy: the comment POST is single-shot (retrying after a post-write
   // timeout would duplicate PR comments — not idempotent); the check-run PATCH
   // is idempotent and retried. Callers must NOT wrap these methods in withRetry.
-  async accept(cycle: CycleRecord, template: string): Promise<void> {
+  async accept(cycle: CycleRecord): Promise<void> {
     const commentUrl = await this.comment(
       cycle,
-      renderTemplate(template, {
+      renderTemplate(GITHUB_ACCEPT_COMMENT, {
         mention: cycle.config.github.mention,
         pr_author: cycle.prAuthor,
       }).trim(),
@@ -175,10 +175,10 @@ export class GitHubClient {
     );
   }
 
-  async reject(cycle: CycleRecord, template: string, reviewComment: string): Promise<void> {
+  async reject(cycle: CycleRecord, reviewComment: string): Promise<void> {
     const commentUrl = await this.comment(
       cycle,
-      renderTemplate(template, {
+      renderTemplate(GITHUB_REJECT_COMMENT, {
         mention: cycle.config.github.mention,
         review_comment: reviewComment,
         pr_author: cycle.prAuthor,

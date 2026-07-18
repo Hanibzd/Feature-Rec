@@ -4,6 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   buildCycleKey,
+  GITHUB_ACCEPT_COMMENT,
+  GITHUB_REJECT_COMMENT,
   isAllowedPullRequestEvent,
   parseFeatureRecConfig,
   renderTemplate,
@@ -14,8 +16,6 @@ version: 1
 github:
   checkName: Feature-Rec
   mention: "@claude"
-  acceptComment: "@{pr_author} validation passed; you can merge."
-  rejectComment: "{mention} make the following changes:\\n\\n{review_comment}"
 slack:
   channel: "C0123"
   mention: "<!subteam^S123|@reviewers>"
@@ -26,11 +26,11 @@ assert.equal(config.github.checkName, "Feature-Rec");
 assert.equal(config.github.mention, "@claude");
 assert.equal(config.slack.approverUsergroups[0], "S123");
 assert.equal(
-  renderTemplate(config.github.acceptComment, { pr_author: "romain" }),
+  renderTemplate(GITHUB_ACCEPT_COMMENT, { pr_author: "romain" }),
   "@romain validation passed; you can merge.",
 );
 assert.equal(
-  renderTemplate(config.github.rejectComment, {
+  renderTemplate(GITHUB_REJECT_COMMENT, {
     mention: config.github.mention,
     review_comment: "make it feel premium",
   }),
@@ -68,16 +68,17 @@ assert.equal(
   false,
 );
 
+// Legacy configs that still set the removed comment-template keys must keep
+// parsing: unknown keys are stripped rather than rejected.
 const yamlConfig = parseFeatureRecConfig(`
 version: 1
 github:
   checkName: Feature-Rec
   mention: "@claude"
-  acceptComment: "@{pr_author} validation passed; you can merge."
+  acceptComment: "legacy key, now ignored"
   rejectComment: |
-    {mention} make the following changes:
-
-    {review_comment}
+    legacy key,
+    now ignored
 slack:
   channel: "C0123 # design-review"
   mention: ""
@@ -85,10 +86,8 @@ slack:
     - "S123"
 `);
 assert.equal(yamlConfig.slack.channel, "C0123 # design-review");
-assert.equal(
-  yamlConfig.github.rejectComment,
-  "{mention} make the following changes:\n\n{review_comment}\n",
-);
+assert.equal("acceptComment" in yamlConfig.github, false);
+assert.equal("rejectComment" in yamlConfig.github, false);
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const exampleConfig = parseFeatureRecConfig(
