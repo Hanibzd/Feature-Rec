@@ -39,8 +39,6 @@ version: 1
 github:
   checkName: Feature-Rec
   mention: "@claude"
-  acceptComment: "@{pr_author} validation passed; you can merge."
-  rejectComment: "{mention} make the following changes:\\n\\n{review_comment}"
 slack:
   channel: "C0123"
   mention: ""
@@ -52,8 +50,6 @@ version: 1
 github:
   checkName: Feature-Rec
   mention: "@claude"
-  acceptComment: "@{pr_author} validation passed; you can merge."
-  rejectComment: "{mention} make the following changes:\\n\\n{review_comment}"
 slack:
   channel: "C0123"
   mention: ""
@@ -311,12 +307,8 @@ try {
 
     try {
       const client = new GitHubClient({ ...env, githubToken: "gh-token" });
-      await client.reject(
-        cycleForGithub,
-        cycleForGithub.config.github.rejectComment,
-        "make it feel premium",
-      );
-      await client.accept(cycleForGithub, cycleForGithub.config.github.acceptComment);
+      await client.reject(cycleForGithub, "make it feel premium");
+      await client.accept(cycleForGithub);
     } finally {
       globalThis.fetch = previousFetch;
     }

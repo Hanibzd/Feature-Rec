@@ -410,7 +410,7 @@ export function buildServer(input: {
       // cycle, so a GitHub failure must not skip the Slack finalize (live
       // buttons on a decided cycle), nor vice versa.
       await settleSideEffects(accepted.id, [
-        ["github accept", github.accept(accepted, accepted.config.github.acceptComment)],
+        ["github accept", github.accept(accepted)],
         ["slack finalize", withRetry(() => slack.finalize(accepted, "accepted", "Validation passed."))],
       ]);
       return;
@@ -443,7 +443,7 @@ export function buildServer(input: {
     // PATCH retries internally (see GitHubClient.reject). GitHub and Slack
     // effects run independently (see accept path for rationale).
     await settleSideEffects(rejected.id, [
-      ["github reject", github.reject(rejected, rejected.config.github.rejectComment, comment.trim())],
+      ["github reject", github.reject(rejected, comment.trim())],
       ["slack finalize", withRetry(() => slack.finalize(rejected, "rejected", comment.trim()))],
     ]);
   }
