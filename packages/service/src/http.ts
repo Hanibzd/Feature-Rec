@@ -244,6 +244,14 @@ export function buildServer(input: {
       }),
     );
 
+    // Advisory onboarding flag, DB-first: a tenant with known channels costs
+    // one SELECT (no Slack traffic on the per-PR hot path); only a tenant that
+    // looks never-onboarded pays a confirming Slack sweep. The runner uses it
+    // to fail frontend-visible PRs before rendering (seconds instead of a full
+    // render) while auto-accepted PRs stay unaffected. Advisory only:
+    // video-time resolution stays authoritative — channels can change mid-cycle.
+    const onboarded = await tenantHasChannels();
+
     // Takeover of a previously `failed` cycle: reuse its existing check run
     // (set it back to in_progress) instead of creating a second one, so a
     // re-run recovers a red check rather than exiting green over a red run.
@@ -262,6 +270,7 @@ export function buildServer(input: {
         cycleKey,
         checkRunId: result.cycle.checkRunId,
         attemptId: result.attemptId,
+        onboarded,
       };
     }
 
@@ -315,8 +324,17 @@ export function buildServer(input: {
       cycleKey,
       checkRunId,
       attemptId: result.attemptId,
+      onboarded,
     };
   });
+
+  // The tenant has at least one active review channel. DB answer first; a
+  // full Slack sweep only to confirm an apparent never-onboarded state.
+  async function tenantHasChannels(): Promise<boolean> {
+    const identity = await slack.botIdentity();
+    if ((await store.activeBotChannels(identity.teamId)).length > 0) return true;
+    return (await syncTenantChannels(store, slack)).channels.length > 0;
+  }
 
   app.post("/api/runs/:cycleId/accepted", async (request, reply) => {
     if (!runnerAuthorized(env, request.headers.authorization)) {
@@ -393,8 +411,9 @@ export function buildServer(input: {
 
       // Resolve the review channel before any side effect: with no channel
       // there is nowhere to post, so fail the cycle with an actionable
-      // check-run message. The runner's follow-up /failed call then no-ops on
-      // the status guard, preserving that message.
+      // check-run message and tell the runner explicitly (settled: true) that
+      // there is nothing left to report. The status guard on /failed remains
+      // as defense-in-depth against races, not as the preservation mechanism.
       let resolved: { teamId: string; channelId: string };
       try {
         resolved = await resolveChannel(store, slack);
@@ -418,7 +437,9 @@ export function buildServer(input: {
             },
           }),
         );
-        return reply.code(422).send({ error: "no_slack_channel", message: err.message });
+        return reply
+          .code(422)
+          .send({ ok: false, error: "no_slack_channel", message: err.message, settled: true });
       }
 
       await withRetry(() =>
@@ -707,9 +728,11 @@ export function buildServer(input: {
       `Mention: ${describeMention(settings?.mention ?? null)}`,
       describeApprovers(settings?.approvers ?? null),
     ];
-    const queue = tenant.channels.slice(1);
-    if (queue.length > 0) {
-      lines.push(`Fallback queue: ${queue.map((channel) => `<#${channel.channelId}>`).join(", ")}.`);
+    const next = tenant.channels[1];
+    if (next) {
+      lines.push(
+        `If I'm removed from <#${active.channelId}>, validations will move to <#${next.channelId}>.`,
+      );
     }
     return lines.join("\n");
   }

@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
-import { isAllowedPullRequestEvent } from "@feature-rec/core";
+import { isAllowedPullRequestEvent, SLACK_NO_CHANNEL_MESSAGE } from "@feature-rec/core";
 import { renderFeatureRecVideo } from "@autodemo/cli/feature-rec";
-import { acceptCycle, failCycle, startCycle, uploadVideo } from "./backend";
+import { acceptCycle, failCycle, SettledBackendError, startCycle, uploadVideo } from "./backend";
 import { classifyFrontendVisible } from "./classifier";
 import { collectDiffContext } from "./diff";
+
+// Frontend-visible PR with no Slack review channel anywhere: reported with
+// the invite instruction alone — a stack trace would bury it.
+class OnboardingRequiredError extends Error {}
 
 type PullRequestEvent = {
   action?: string;
@@ -89,6 +93,13 @@ async function main(): Promise<void> {
       return;
     }
 
+    // Frontend-visible with no Slack review channel anywhere: fail before the
+    // render, not after. Advisory only — the backend re-resolves the channel
+    // authoritatively at video time.
+    if (started.onboarded === false) {
+      throw new OnboardingRequiredError(SLACK_NO_CHANNEL_MESSAGE);
+    }
+
     const selectedSources = diff.frontendSources.filter((source) =>
       classifier.files.length === 0 ? true : classifier.files.includes(source.file),
     );
@@ -106,7 +117,18 @@ async function main(): Promise<void> {
     });
     await uploadVideo(apiUrl, started.cycleId, video, attemptId);
   } catch (err) {
-    const message = err instanceof Error ? err.stack ?? err.message : String(err);
+    // Backend-settled failures already carry an actionable check-run message;
+    // reporting again would overwrite it with a generic stack trace.
+    if (err instanceof SettledBackendError) {
+      console.error(`Feature-Rec: ${err.message}`);
+      throw err;
+    }
+    const message =
+      err instanceof OnboardingRequiredError
+        ? err.message
+        : err instanceof Error
+          ? err.stack ?? err.message
+          : String(err);
     await failCycle(apiUrl, started.cycleId, message, attemptId);
     throw err;
   }

@@ -60,9 +60,10 @@ type StartResponse = {
   checkRunId?: number;
   duplicate?: boolean;
   attemptId?: string;
+  onboarded?: boolean;
 };
 
-type ResultResponse = { ok?: boolean; stale?: boolean; error?: string };
+type ResultResponse = { ok?: boolean; stale?: boolean; error?: string; settled?: boolean };
 
 type AppInstance = ReturnType<typeof buildServer>;
 
@@ -916,6 +917,9 @@ try {
     ).body;
     assert.ok(first.cycleId && first.attemptId);
     assert.ok(second.cycleId && second.attemptId);
+    // Advisory flag: a tenant with an active channel reports onboarded.
+    assert.equal(first.onboarded, true);
+    assert.equal(second.onboarded, true);
     await postVideo(app, first.cycleId!, first.attemptId);
     await postVideo(app, second.cycleId!, second.attemptId);
     assert.deepEqual(slack.postValidationArgs, [
@@ -1106,7 +1110,7 @@ try {
     assert.ok(status.includes("Validations go to <#CCMD>."));
     assert.ok(status.includes("Mention: off"));
     assert.ok(status.includes("Approvers: everyone in the channel."));
-    assert.ok(status.includes("Fallback queue: <#CCMD2>."));
+    assert.ok(status.includes("If I'm removed from <#CCMD>, validations will move to <#CCMD2>."));
 
     assert.ok((await run("wat")).body.text?.startsWith("Usage:"));
     assert.ok((await run("")).body.text?.startsWith("Usage:"));
@@ -1315,10 +1319,16 @@ try {
     const slack = makeSlackStub({ teamId: "TEMPTY", channels: [] });
     const app = makeApp(github, slack);
     const start = (await startRun(app, makeStart(24, { headSha: "nochannel1" }))).body;
+    // Advisory flag: an unboarded tenant is announced at start so the runner
+    // can fail frontend-visible PRs before rendering.
+    assert.equal(start.onboarded, false);
 
     const video = await postVideo(app, start.cycleId!, start.attemptId);
     assert.equal(video.res.statusCode, 422);
     assert.equal(video.body.error, "no_slack_channel");
+    // Machine-readable settlement: the backend already failed the cycle and
+    // wrote the check run, so the runner must skip its own failure report.
+    assert.equal(video.body.settled, true);
     assert.equal((await store.getCycle(start.cycleId!))?.status, "failed");
     assert.equal(github.checkRuns.get(start.checkRunId!)?.conclusion, "failure");
     assert.equal(slack.uploadVideoCalls, 0);

@@ -36,6 +36,10 @@ export const RunStartResponseSchema = z.object({
   checkRunId: z.number().int().positive().optional(),
   duplicate: z.boolean().optional(),
   attemptId: z.string().min(1).optional(),
+  // Advisory: whether the tenant has any Slack review channel. Lets the
+  // runner fail a frontend-visible PR before rendering; video-time channel
+  // resolution stays authoritative.
+  onboarded: z.boolean().optional(),
 });
 export type RunStartResponse = z.infer<typeof RunStartResponseSchema>;
 
