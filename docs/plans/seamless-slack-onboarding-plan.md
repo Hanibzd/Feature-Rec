@@ -27,7 +27,7 @@ Messages include `owner/repo#N` for clarity.
 | Mention           | Default to positional, non-personal `@here`. Allow a per-channel override with `/feature-rec mention <targets>` where targets are a usergroup, a user or list of users, `@here`, `@channel`, or `off`, stored server-side. No YAML key.                                                                                                                                                                                                         |
 | Approvers         | Default to everyone in the channel: visibility is the gate, so one person's absence cannot block a merge. Optionally restrict a channel with `/feature-rec approvers @usergroup [@user …]`. Check on click and answer unauthorized clicks ephemerally with “Only @product-team can approve”; never drop them silently. `everyone` resets the setting. This is independent of mention, and replaces the former `approverUsergroups` YAML key.    |
 | YAML              | None. The config file is removed entirely: the action reads no file, and `config`/`configHash` leave the runner protocol (`cycleKey` becomes `owner/repo#N:headSha`). Existing `.github/feature-rec-config.yaml` files are simply ignored.                                                                                                                                                                                                      |
-| Multitenancy      | Not implemented, but routing already means “oldest active channel WHERE `team_id = tenant`.” Store `team_id` now and put token access behind `tokenForTeam()` (the env token today); v0 carries no `enterprise_id` — re-added at multitenancy time with a derivable backfill. Multitenancy adds org↔workspace pairing and per-team tokens, without changing channel selection. Pairing is never user-facing: create it during Slack + GitHub OAuth on a setup page, or manage it operationally; never expose `/connect`. |
+| Multitenancy      | Not implemented, but routing already means “oldest active channel WHERE `team_id = tenant`.” Store `team_id` now and put token access behind `tokenForTeam()` (the env token today); v0 keys everything on the workspace and carries nothing org-level. Multitenancy adds org↔workspace pairing and per-team tokens, without changing channel selection. Pairing is never user-facing: create it during Slack + GitHub OAuth on a setup page, or manage it operationally; never expose `/connect`. |
 
 
 ## Architecture
@@ -166,10 +166,10 @@ is the tenant; operator-managed rows can bridge early customers.
 - **Per-team tokens:** replace the internals of `tokenForTeam()`; it uses the env token
 today.
 - **GitHub OIDC runner auth:** replace the shared bearer token.
-- **Enterprise Grid installs:** add an `enterprise_id` column at multitenancy time.
-  The backfill is derivable — in the single-token era every row belongs to the
-  token's org (`auth.test`), and later the pairing table knows each team's org —
-  so deferring the column loses nothing.
+- **Org-level (multi-workspace) installs:** out of scope for v0; any org-level
+  identity gets introduced at multitenancy time, and backfilling it is derivable
+  (in the single-token era every row belongs to the token's workspace, and later
+  the pairing table knows each workspace's owner), so deferring loses nothing.
 
 ## Dev plan
 
@@ -217,14 +217,15 @@ through the same check-run error path until the reinstall happens.
 of invite order, but stays deterministic.
 - **Bot in an externally shared channel:** Exclude it from routing; the greeting may
 explain why.
-- **Enterprise membership-event privacy:** `member_joined_channel` fires for every
+- **Membership-event privacy:** `member_joined_channel` fires for every
 user entering a bot channel. Drop non-bot events immediately and never log their
 payloads.
-- **Enterprise event auto-disable:** Slack may disable repeatedly failing endpoints.
+- **Events auto-disable:** Slack may disable repeatedly failing endpoints.
 Polling remains authoritative, so lost events affect only greetings, promotion
 notices, and invite-vs-observation ordering—not validations.
-- **Enterprise app review:** `groups:read` plus public event and command URLs increase
-admin-review friction; prepare onboarding documentation for it.
+- **Admin app review:** `groups:read` plus public event and command URLs increase
+admin-review friction in security-conscious workspaces; prepare onboarding
+documentation for it.
 - **Rate limits:** One `users.conversations` sweep per validation post is well below
 Slack's tier limits; the DB is sufficient cache.
 

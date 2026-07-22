@@ -3,11 +3,12 @@
 Single-workspace assumptions currently baked into the service, recorded so the
 multitenant redesign revisits them deliberately.
 
-Note: v0 stores no `enterprise_id` anywhere. That is safe to defer because it
-is always derivable — in the single-token era every row belongs to the token's
-org (`auth.test` reports it), and at multitenancy time the org↔workspace
-pairing table knows each team's org — so re-adding it is one nullable-column
-migration plus a one-line backfill. Both concern how the backend
+Note: v0 stores no org-level identity anywhere — the workspace (`team_id`) is
+the only tenant key. That is safe to defer because org identity is always
+derivable — in the single-token era every row belongs to the token's workspace
+(`auth.test` reports its owner), and at multitenancy time the org↔workspace
+pairing table knows each workspace's owner — so introducing it later is one
+nullable-column migration plus a one-line backfill. Both concern how the backend
 decides "which workspace am I talking to" — today there is exactly one answer,
 so simple designs are correct; multi-workspace makes the same designs hazards.
 
@@ -27,9 +28,9 @@ payload missing team context would silently resolve to whichever workspace the
 global token belongs to, routing state into another tenant.
 
 Multitenant version: never fall back to a global bot identity. Resolve the
-tenant from the request's installation/enterprise context (payload `team_id` /
-`enterprise_id` → pairing table) and use that tenant's token via
-`tokenForTeam()`; treat missing team context as an error, not a default.
+tenant from the request's installation context (payload `team_id` → pairing
+table) and use that tenant's token via `tokenForTeam()`; treat missing team
+context as an error, not a default.
 
 In practice the fallback should be nearly dead code — block actions, view
 submissions, slash commands, and event callbacks all carry a team id. If it
@@ -40,7 +41,7 @@ makes it dangerous.
 
 Why `auth.test` instead of storing identity in the DB: Slack is the source of
 truth for which installation the token belongs to. `auth.test` derives the bot
-user id, team id, and enterprise id directly from `SLACK_BOT_TOKEN`, so
+user id and team id directly from `SLACK_BOT_TOKEN`, so
 identity can never drift from the configured token — a DB copy would need
 setup and synchronization logic to avoid stale or mismatched token/identity
 records.
@@ -65,6 +66,6 @@ Trade-offs:
   correct.
 
 For multi-workspace support the DB approach becomes necessary: store each
-installation's bot token and select it by `teamId`/`enterpriseId`
-(`tokenForTeam()`). For one global token, cached `auth.test` is the right
-design — simpler and less error-prone, though not universally "better."
+installation's bot token and select it by `teamId` (`tokenForTeam()`). For one
+global token, cached `auth.test` is the right design — simpler and less
+error-prone, though not universally "better."
