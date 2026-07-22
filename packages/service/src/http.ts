@@ -3,20 +3,30 @@ import crypto from "node:crypto";
 import {
   buildCycleKey,
   ClassifierResultSchema,
+  renderTemplate,
   RunStartRequestSchema,
   SlackApprovalPayloadSchema,
+  SLACK_GREETING_ACTIVE,
+  SLACK_GREETING_NEXT_IN_LINE,
+  SLACK_GREETING_QUEUED,
+  SLACK_NO_CHANNEL_MESSAGE,
+  SLACK_PROMOTION_NOTICE,
 } from "@feature-rec/core";
 import type { ServiceEnv } from "./env";
+import { ChannelResolutionError, resolveChannel, syncTenantChannels } from "./channels";
 import { GitHubClient } from "./github";
 import { withRetry } from "./retry";
 import { SlackClient, verifySlackSignature } from "./slack";
-import type { CycleStore } from "./storage";
+import type { SlackUsergroup } from "./slack";
+import type { BotChannel, CycleRecord, CycleStore } from "./storage";
 
 const VIDEO_BODY_LIMIT_BYTES = 500 * 1024 * 1024;
 
 type SlackPayload = {
   type: "block_actions" | "view_submission";
   trigger_id?: string;
+  response_url?: string;
+  team?: { id?: string };
   user?: { id?: string; username?: string; name?: string };
   actions?: Array<{ action_id?: string; action_ts?: string; value?: string }>;
   view?: {
@@ -29,10 +39,71 @@ type SlackPayload = {
   };
 };
 
+type SlackEventEnvelope = {
+  type?: string;
+  challenge?: string;
+  team_id?: string;
+  event_id?: string;
+  event?: {
+    type?: string;
+    user?: string;
+    channel?: string;
+    event_ts?: string;
+  };
+};
+
 function param(params: unknown, key: string): string {
   const value = (params as Record<string, unknown>)[key];
   if (typeof value !== "string" || !value) throw new Error(`Missing parameter ${key}`);
   return value;
+}
+
+// Slash-command target syntax. With "Escape channels, users, and links"
+// enabled on the command, user mentions arrive as <@U…|name>; usergroups and
+// @here/@channel arrive as typed.
+const USER_MENTION_RE = /^<@([UW][A-Z0-9]+)(?:\|[^>]*)?>$/;
+const SUBTEAM_MENTION_RE = /^<!subteam\^(S[A-Z0-9]+)(?:\|[^>]*)?>$/;
+
+// A user-correctable command mistake: the message goes back ephemerally
+// instead of becoming a 500.
+class CommandError extends Error {}
+
+const COMMAND_USAGE = [
+  "Usage:",
+  "`/feature-rec mention @here|@channel|@usergroup|@user…|off` — who validation requests mention; no target shows the current value",
+  "`/feature-rec approvers @usergroup|@user…|everyone` — restrict who can approve; no argument shows the current value",
+  "`/feature-rec status` — show routing, mention, and approvers",
+].join("\n");
+
+function describeMention(mention: string | null): string {
+  if (mention === null) return "@here (default)";
+  if (mention === "") return "off";
+  return mention;
+}
+
+function renderApproverIds(ids: string[]): string {
+  return ids.map((id) => (id.startsWith("S") ? `<!subteam^${id}>` : `<@${id}>`)).join(", ");
+}
+
+function describeApprovers(approvers: string[] | null): string {
+  return approvers && approvers.length > 0
+    ? `Approvers: ${renderApproverIds(approvers)}`
+    : "Approvers: everyone in the channel.";
+}
+
+function rawJsonBody(body: unknown): string {
+  if (body && typeof body === "object") {
+    const raw = (body as { __rawBody?: unknown }).__rawBody;
+    if (typeof raw === "string") return raw;
+  }
+  return "";
+}
+
+function slackTsToIso(ts: string | undefined): string {
+  const seconds = Number(ts);
+  return Number.isFinite(seconds) && seconds > 0
+    ? new Date(seconds * 1000).toISOString()
+    : new Date().toISOString();
 }
 
 function timingSafeStringEqual(left: string, right: string): boolean {
@@ -173,6 +244,22 @@ export function buildServer(input: {
       }),
     );
 
+    // Advisory onboarding flag, DB-first: a tenant with known channels costs
+    // one SELECT (no Slack traffic on the per-PR hot path); only a tenant that
+    // looks never-onboarded pays a confirming Slack sweep. The runner uses it
+    // to fail frontend-visible PRs before rendering (seconds instead of a full
+    // render) while auto-accepted PRs stay unaffected. Advisory only:
+    // video-time resolution stays authoritative — channels can change mid-cycle.
+    //
+    // Advisory means it must never fail the start: a Slack outage here would
+    // otherwise strand the cycle as `analyzing` with no attemptId returned, and
+    // every retry would exit as a duplicate. Unknown → omit the flag and let
+    // video-time resolution decide.
+    const onboarded = await tenantHasChannels().catch((err: unknown) => {
+      request.log.warn({ err }, "advisory onboarding check failed; deferring to video-time resolution");
+      return undefined;
+    });
+
     // Takeover of a previously `failed` cycle: reuse its existing check run
     // (set it back to in_progress) instead of creating a second one, so a
     // re-run recovers a red check rather than exiting green over a red run.
@@ -191,6 +278,7 @@ export function buildServer(input: {
         cycleKey,
         checkRunId: result.cycle.checkRunId,
         attemptId: result.attemptId,
+        onboarded,
       };
     }
 
@@ -244,8 +332,17 @@ export function buildServer(input: {
       cycleKey,
       checkRunId,
       attemptId: result.attemptId,
+      onboarded,
     };
   });
+
+  // The tenant has at least one active review channel. DB answer first; a
+  // full Slack sweep only to confirm an apparent never-onboarded state.
+  async function tenantHasChannels(): Promise<boolean> {
+    const identity = await slack.botIdentity();
+    if ((await store.activeBotChannels(identity.teamId)).length > 0) return true;
+    return (await syncTenantChannels(store, slack)).channels.length > 0;
+  }
 
   app.post("/api/runs/:cycleId/accepted", async (request, reply) => {
     if (!runnerAuthorized(env, request.headers.authorization)) {
@@ -320,6 +417,39 @@ export function buildServer(input: {
       });
       if (!cycle) return reply.send({ ok: false, stale: true });
 
+      // Resolve the review channel before any side effect: with no channel
+      // there is nowhere to post, so fail the cycle with an actionable
+      // check-run message and tell the runner explicitly (settled: true) that
+      // there is nothing left to report. The status guard on /failed remains
+      // as defense-in-depth against races, not as the preservation mechanism.
+      let resolved: { teamId: string; channelId: string };
+      try {
+        resolved = await resolveChannel(store, slack);
+      } catch (err) {
+        if (!(err instanceof ChannelResolutionError)) throw err;
+        const failed = await store.transitionRunnerStatus({
+          cycleId: cycle.id,
+          attemptId,
+          from: ["pending_validation"],
+          to: "failed",
+        });
+        // Superseded while resolving: the superseder already neutralized the
+        // check run — don't clobber its conclusion with a failure.
+        if (!failed) return reply.send({ ok: false, stale: true });
+        await withRetry(() =>
+          github.updateCheckRun(cycle, {
+            conclusion: "failure",
+            output: {
+              title: "Feature-Rec: no Slack review channel",
+              summary: err.message,
+            },
+          }),
+        );
+        return reply
+          .code(422)
+          .send({ ok: false, error: "no_slack_channel", message: err.message, settled: true });
+      }
+
       await withRetry(() =>
         github.updateCheckRun(cycle, {
           status: "in_progress",
@@ -330,8 +460,13 @@ export function buildServer(input: {
         }),
       );
 
-      await slack.uploadVideo(cycle.config, cycle, video);
-      const message = await slack.postValidation(cycle.config, cycle);
+      await slack.uploadVideo(cycle, resolved.channelId, video);
+      const settings = await store.getChannelSettings(resolved.teamId, resolved.channelId);
+      const message = await slack.postValidation(
+        cycle,
+        resolved.channelId,
+        settings?.mention ?? null,
+      );
       const statusAfter = await store.attachSlackMessage(cycle.id, message.channel, message.ts);
       if (statusAfter === "superseded") {
         // Superseded after the transition but before the Slack post landed:
@@ -382,6 +517,301 @@ export function buildServer(input: {
     return reply.send("");
   });
 
+  app.post("/api/slack/events", async (request, reply) => {
+    const signatureOk = verifySlackSignature({
+      signingSecret: env.slackSigningSecret,
+      timestamp: request.headers["x-slack-request-timestamp"] as string | undefined,
+      signature: request.headers["x-slack-signature"] as string | undefined,
+      rawBody: rawJsonBody(request.body),
+    });
+    if (!signatureOk) return reply.code(401).send({ error: "invalid slack signature" });
+
+    const body = request.body as SlackEventEnvelope;
+    if (body.type === "url_verification") return reply.send({ challenge: body.challenge ?? "" });
+    if (body.type !== "event_callback") return reply.send({ ok: true });
+
+    // Drop everything that isn't a bot membership change, without logging it:
+    // membership events fire for every user entering a bot channel and their
+    // payloads must never reach the logs.
+    const event = body.event ?? {};
+    const isJoin = event.type === "member_joined_channel";
+    const isLeave = event.type === "member_left_channel";
+    if ((!isJoin && !isLeave) || !event.user || !event.channel) return reply.send({ ok: true });
+    const identity = await slack.botIdentity();
+    if (event.user !== identity.userId) return reply.send({ ok: true });
+
+    const teamId = body.team_id ?? identity.teamId;
+    const channelId = event.channel;
+    const eventAt = slackTsToIso(event.event_ts);
+
+    // The idempotent DB write lands before the 200, so a pre-ack crash rides
+    // Slack's retries; greetings and notices run detached so Slack API latency
+    // cannot consume the 3-second deadline.
+    if (isJoin) {
+      await store.recordChannelJoin({
+        teamId,
+        channelId,
+        joinedAt: eventAt,
+      });
+      if (await isFirstEventDelivery(body.event_id)) {
+        void greetJoinedChannel(teamId, channelId).catch((err) => app.log.error(err));
+      }
+      return reply.send({ ok: true });
+    }
+
+    const activeBefore = await store.activeBotChannels(teamId);
+    // A stale leave (older than the latest observed membership, e.g. a
+    // delayed first delivery after a rejoin) changes nothing, so it must not
+    // announce a promotion the channel never went through.
+    const left = await store.recordChannelLeave({ teamId, channelId, leftAt: eventAt });
+    if (left && (await isFirstEventDelivery(body.event_id))) {
+      void notifyPromotion(teamId, channelId, activeBefore).catch((err) => app.log.error(err));
+    }
+    return reply.send({ ok: true });
+  });
+
+  // Membership writes are idempotent; greetings and promotion notices are
+  // not. Slack retries deliveries (including after a lost ack, when we DID
+  // already post), so the human-facing side effects dedupe on the globally
+  // unique event_id. Recorded after the membership write: a crash between the
+  // two replays the idempotent write on retry and still greets exactly once.
+  async function isFirstEventDelivery(eventId: string | undefined): Promise<boolean> {
+    if (!eventId) return true;
+    return store.recordProcessedInteraction(`slack-event:${eventId}`, "slack-event");
+  }
+
+  app.post("/api/slack/commands", async (request, reply) => {
+    const rawBody = String(request.body ?? "");
+    const signatureOk = verifySlackSignature({
+      signingSecret: env.slackSigningSecret,
+      timestamp: request.headers["x-slack-request-timestamp"] as string | undefined,
+      signature: request.headers["x-slack-signature"] as string | undefined,
+      rawBody,
+    });
+    if (!signatureOk) return reply.code(401).send({ error: "invalid slack signature" });
+
+    const form = new URLSearchParams(rawBody);
+    const teamId = form.get("team_id") ?? "";
+    const channelId = form.get("channel_id") ?? "";
+    const userId = form.get("user_id") ?? "";
+    if (!teamId || !channelId || !userId) {
+      return reply.code(400).send({ error: "malformed command payload" });
+    }
+
+    const ephemeral = (text: string) => reply.send({ response_type: "ephemeral", text });
+    const [subcommand, ...args] = (form.get("text") ?? "").trim().split(/\s+/).filter(Boolean);
+    try {
+      if (subcommand === "mention") {
+        return ephemeral(await mentionCommand({ teamId, channelId, userId, args }));
+      }
+      if (subcommand === "approvers") {
+        return ephemeral(await approversCommand({ teamId, channelId, userId, args }));
+      }
+      if (subcommand === "status") {
+        return ephemeral(await statusCommand(teamId, channelId));
+      }
+      return ephemeral(COMMAND_USAGE);
+    } catch (err) {
+      if (err instanceof CommandError) return ephemeral(err.message);
+      throw err;
+    }
+  });
+
+  async function mentionCommand(input: {
+    teamId: string;
+    channelId: string;
+    userId: string;
+    args: string[];
+  }): Promise<string> {
+    if (input.args.length === 0) {
+      const settings = await store.getChannelSettings(input.teamId, input.channelId);
+      return `Mention: ${describeMention(settings?.mention ?? null)}`;
+    }
+    if (input.args.includes("off")) {
+      if (input.args.length > 1) {
+        throw new CommandError('Use "off" by itself: `/feature-rec mention off`.');
+      }
+      await store.setMention({
+        teamId: input.teamId,
+        channelId: input.channelId,
+        mention: "",
+        updatedBy: input.userId,
+      });
+      return "Mention turned off for validation requests in this channel.";
+    }
+    const mention = (await resolveMentionTargets(input.args)).join(" ");
+    await store.setMention({
+      teamId: input.teamId,
+      channelId: input.channelId,
+      mention,
+      updatedBy: input.userId,
+    });
+    return `Validation requests in this channel will mention ${mention}.`;
+  }
+
+  async function resolveMentionTargets(tokens: string[]): Promise<string[]> {
+    const rendered: string[] = [];
+    let usergroups: SlackUsergroup[] | null = null;
+    for (const token of tokens) {
+      if (token === "@here" || token === "<!here>") {
+        rendered.push("<!here>");
+        continue;
+      }
+      if (token === "@channel" || token === "<!channel>") {
+        rendered.push("<!channel>");
+        continue;
+      }
+      const user = USER_MENTION_RE.exec(token);
+      if (user) {
+        rendered.push(`<@${user[1]}>`);
+        continue;
+      }
+      if (SUBTEAM_MENTION_RE.test(token)) {
+        rendered.push(token);
+        continue;
+      }
+      usergroups ??= await slack.listUsergroups();
+      const handle = token.replace(/^@/, "");
+      const group = usergroups.find((candidate) => candidate.handle === handle);
+      if (!group) {
+        throw new CommandError(
+          `Unknown mention target ${token}. Use @here, @channel, a usergroup handle, user mentions, or "off".`,
+        );
+      }
+      rendered.push(`<!subteam^${group.id}|@${group.handle}>`);
+    }
+    return rendered;
+  }
+
+  async function approversCommand(input: {
+    teamId: string;
+    channelId: string;
+    userId: string;
+    args: string[];
+  }): Promise<string> {
+    if (input.args.length === 0) {
+      const settings = await store.getChannelSettings(input.teamId, input.channelId);
+      return describeApprovers(settings?.approvers ?? null);
+    }
+    if (input.args.includes("everyone") || input.args.includes("off")) {
+      if (input.args.length > 1) {
+        throw new CommandError('Use "everyone" by itself: `/feature-rec approvers everyone`.');
+      }
+      await store.setApprovers({
+        teamId: input.teamId,
+        channelId: input.channelId,
+        approvers: null,
+        updatedBy: input.userId,
+      });
+      return "Everyone in the channel can now approve.";
+    }
+    const ids = await resolveApproverTargets(input.args);
+    await store.setApprovers({
+      teamId: input.teamId,
+      channelId: input.channelId,
+      approvers: ids,
+      updatedBy: input.userId,
+    });
+    return `Only ${renderApproverIds(ids)} can approve.`;
+  }
+
+  async function resolveApproverTargets(tokens: string[]): Promise<string[]> {
+    const ids = new Set<string>();
+    let usergroups: SlackUsergroup[] | null = null;
+    for (const token of tokens) {
+      const user = USER_MENTION_RE.exec(token);
+      if (user) {
+        ids.add(user[1]);
+        continue;
+      }
+      const subteam = SUBTEAM_MENTION_RE.exec(token);
+      if (subteam) {
+        ids.add(subteam[1]);
+        continue;
+      }
+      usergroups ??= await slack.listUsergroups();
+      const handle = token.replace(/^@/, "");
+      const group = usergroups.find((candidate) => candidate.handle === handle);
+      if (!group) {
+        throw new CommandError(
+          `Unknown approver ${token}. Use usergroup handles, user mentions, or "everyone".`,
+        );
+      }
+      ids.add(group.id);
+    }
+    return [...ids];
+  }
+
+  async function statusCommand(teamId: string, channelId: string): Promise<string> {
+    const tenant = await syncTenantChannels(store, slack);
+    const active = tenant.channels[0];
+    if (!active) return SLACK_NO_CHANNEL_MESSAGE;
+    const settings = await store.getChannelSettings(teamId, channelId);
+    const lines = [
+      `Validations go to <#${active.channelId}>.`,
+      `Mention: ${describeMention(settings?.mention ?? null)}`,
+      describeApprovers(settings?.approvers ?? null),
+    ];
+    const next = tenant.channels[1];
+    if (next) {
+      lines.push(
+        `If I'm removed from <#${active.channelId}>, validations will move to <#${next.channelId}>.`,
+      );
+    }
+    return lines.join("\n");
+  }
+
+  async function greetJoinedChannel(teamId: string, channelId: string): Promise<void> {
+    const active = await store.activeBotChannels(teamId);
+    const rank = active.findIndex((channel) => channel.channelId === channelId) + 1;
+    if (rank === 0) return; // already left again; nothing to greet
+    const text =
+      rank === 1
+        ? SLACK_GREETING_ACTIVE
+        : renderTemplate(rank === 2 ? SLACK_GREETING_NEXT_IN_LINE : SLACK_GREETING_QUEUED, {
+            active_channel: `<#${active[0].channelId}>`,
+          });
+    await slack.postMessage(channelId, text);
+  }
+
+  async function notifyPromotion(
+    teamId: string,
+    leftChannelId: string,
+    activeBefore: BotChannel[],
+  ): Promise<void> {
+    if (activeBefore[0]?.channelId !== leftChannelId) return;
+    const promoted = (await store.activeBotChannels(teamId))[0];
+    if (promoted) await slack.postMessage(promoted.channelId, SLACK_PROMOTION_NOTICE);
+  }
+
+  // Approval authorization comes from the channel's settings at click time:
+  // no list means everyone in the channel may approve; otherwise expand the
+  // stored usergroups/users and answer unauthorized clicks ephemerally —
+  // never drop them silently.
+  async function approvalGate(
+    payload: SlackPayload,
+    cycle: CycleRecord,
+    responseUrl: string | undefined,
+  ): Promise<boolean> {
+    const teamId = payload.team?.id ?? (await slack.botIdentity()).teamId;
+    const settings = cycle.slackChannelId
+      ? await store.getChannelSettings(teamId, cycle.slackChannelId)
+      : null;
+    const approvers = settings?.approvers ?? null;
+    if (await slack.isApprover(approvers, payload.user?.id)) return true;
+    app.log.warn({ cycleId: cycle.id, slackUserId: payload.user?.id }, "unauthorized Slack approver");
+    if (responseUrl && approvers) {
+      // Best-effort: a modal can outlive its stashed response_url (30 min),
+      // and a dead URL must not turn the rejection into a handler error.
+      await slack
+        .respondEphemeral(responseUrl, `Only ${renderApproverIds(approvers)} can approve.`)
+        .catch((err: unknown) =>
+          app.log.warn({ err, cycleId: cycle.id }, "unauthorized-approver ephemeral reply failed"),
+        );
+    }
+    return false;
+  }
+
   async function handleBlockAction(payload: SlackPayload): Promise<void> {
     const action = payload.actions?.[0];
     const value = SlackApprovalPayloadSchema.parse(JSON.parse(action?.value ?? "{}"));
@@ -389,10 +819,7 @@ export function buildServer(input: {
 
     const cycle = await store.getCycle(value.cycleId);
     if (!cycle) return;
-    if (!(await slack.isApprover(cycle.config, payload.user?.id))) {
-      app.log.warn({ cycleId: cycle.id, slackUserId: payload.user?.id }, "unauthorized Slack approver");
-      return;
-    }
+    if (!(await approvalGate(payload, cycle, payload.response_url))) return;
     if (!(await store.recordProcessedInteraction(interactionId, value.cycleId))) return;
 
     if (value.action === "accept") {
@@ -417,20 +844,21 @@ export function buildServer(input: {
     }
 
     if (payload.trigger_id) {
-      await slack.openRequestChangesModal(payload.trigger_id, cycle);
+      await slack.openRequestChangesModal(payload.trigger_id, cycle, payload.response_url);
     }
   }
 
   async function handleViewSubmission(payload: SlackPayload, comment: string): Promise<void> {
-    const meta = JSON.parse(payload.view?.private_metadata ?? "{}") as { cycleId?: string; headSha?: string };
+    const meta = JSON.parse(payload.view?.private_metadata ?? "{}") as {
+      cycleId?: string;
+      headSha?: string;
+      responseUrl?: string;
+    };
     const cycleId = meta.cycleId ?? "";
     const interactionId = `view:${payload.view?.id ?? ""}:${payload.view?.hash ?? ""}`;
     const cycle = await store.getCycle(cycleId);
     if (!cycle) return;
-    if (!(await slack.isApprover(cycle.config, payload.user?.id))) {
-      app.log.warn({ cycleId: cycle.id, slackUserId: payload.user?.id }, "unauthorized Slack approver");
-      return;
-    }
+    if (!(await approvalGate(payload, cycle, meta.responseUrl))) return;
     if (!(await store.recordProcessedInteraction(interactionId, cycleId))) return;
 
     const rejected = await store.transitionSlackStatus({

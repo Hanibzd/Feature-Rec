@@ -3,13 +3,19 @@ import crypto from "node:crypto";
 import { Client } from "pg";
 import {
   buildCycleKey,
-  parseFeatureRecConfig,
+  renderTemplate,
+  SLACK_GREETING_ACTIVE,
+  SLACK_GREETING_NEXT_IN_LINE,
+  SLACK_GREETING_QUEUED,
+  SLACK_NO_CHANNEL_MESSAGE,
+  SLACK_PROMOTION_NOTICE,
   type RunStartRequest,
 } from "@feature-rec/core";
+import { ChannelResolutionError, resolveChannel } from "../src/channels";
 import { GitHubClient } from "../src/github";
 import type { ServiceEnv } from "../src/env";
 import { buildServer } from "../src/http";
-import { verifySlackSignature } from "../src/slack";
+import { SlackClient, verifySlackSignature } from "../src/slack";
 import { PostgresCycleStore } from "../src/storage/postgres";
 
 // Requires a Postgres reachable at TEST_DATABASE_URL (an admin/maintenance DB).
@@ -34,22 +40,6 @@ const testUrl = (() => {
   return url.toString();
 })();
 
-const config = parseFeatureRecConfig(`
-version: 1
-slack:
-  channel: "C0123"
-  mention: ""
-  approverUsergroups: []
-`);
-
-const restrictedConfig = parseFeatureRecConfig(`
-version: 1
-slack:
-  channel: "C0123"
-  mention: ""
-  approverUsergroups: ["S123"]
-`);
-
 const env: ServiceEnv = {
   port: 0,
   baseUrl: "http://localhost",
@@ -70,9 +60,10 @@ type StartResponse = {
   checkRunId?: number;
   duplicate?: boolean;
   attemptId?: string;
+  onboarded?: boolean;
 };
 
-type ResultResponse = { ok?: boolean; stale?: boolean; error?: string };
+type ResultResponse = { ok?: boolean; stale?: boolean; error?: string; settled?: boolean };
 
 type AppInstance = ReturnType<typeof buildServer>;
 
@@ -116,19 +107,42 @@ function makeGithubStub() {
   return stub;
 }
 
-function makeSlackStub() {
+function makeSlackStub(options: { teamId?: string; channels?: string[] } = {}) {
+  const teamId = options.teamId ?? "T0123";
   const finalizeCalls: Array<{ state: string; channel: string; ts: string }> = [];
   const stub = {
+    channels: options.channels ?? ["C0123"],
+    usergroups: [] as Array<{ id: string; handle: string }>,
+    usergroupMembers: {} as Record<string, string[]>,
+    postMessageCalls: [] as Array<{ channel: string; text: string }>,
+    ephemeralCalls: [] as Array<{ url: string; text: string }>,
+    uploadVideoChannels: [] as string[],
+    postValidationArgs: [] as Array<{ channel: string; mention: string | null }>,
     uploadVideoCalls: 0,
     postValidationCalls: 0,
     isApproverCalls: 0,
     finalizeCalls,
-    uploadVideo: async (): Promise<void> => {
-      stub.uploadVideoCalls += 1;
+    botIdentity: async () => ({ userId: "UBOT", teamId }),
+    listBotChannels: async (): Promise<string[]> => [...stub.channels],
+    listUsergroups: async (): Promise<Array<{ id: string; handle: string }>> => stub.usergroups,
+    postMessage: async (channel: string, text: string): Promise<void> => {
+      stub.postMessageCalls.push({ channel, text });
     },
-    postValidation: async (): Promise<{ channel: string; ts: string }> => {
+    respondEphemeral: async (url: string, text: string): Promise<void> => {
+      stub.ephemeralCalls.push({ url, text });
+    },
+    uploadVideo: async (_cycle: unknown, channel: string): Promise<void> => {
+      stub.uploadVideoCalls += 1;
+      stub.uploadVideoChannels.push(channel);
+    },
+    postValidation: async (
+      _cycle: unknown,
+      channel: string,
+      mention: string | null,
+    ): Promise<{ channel: string; ts: string }> => {
       stub.postValidationCalls += 1;
-      return { channel: "C0123", ts: `1710000000.${String(stub.postValidationCalls).padStart(6, "0")}` };
+      stub.postValidationArgs.push({ channel, mention });
+      return { channel, ts: `1710000000.${String(stub.postValidationCalls).padStart(6, "0")}` };
     },
     finalize: async (
       cycle: { slackChannelId: string | null; slackMessageTs: string | null },
@@ -139,9 +153,17 @@ function makeSlackStub() {
       finalizeCalls.push({ state, channel: cycle.slackChannelId, ts: cycle.slackMessageTs });
     },
     openRequestChangesModal: async (): Promise<void> => {},
-    isApprover: async (): Promise<boolean> => {
+    // Same semantics as SlackClient.isApprover, with usergroup expansion
+    // served from usergroupMembers instead of the Slack API.
+    isApprover: async (
+      approvers: string[] | null,
+      userId: string | undefined,
+    ): Promise<boolean> => {
       stub.isApproverCalls += 1;
-      return true;
+      if (!approvers || approvers.length === 0) return true;
+      if (!userId) return false;
+      if (approvers.includes(userId)) return true;
+      return approvers.some((id) => (stub.usergroupMembers[id] ?? []).includes(userId));
     },
   };
   return stub;
@@ -156,8 +178,6 @@ function makeStart(prNumber: number, overrides: Partial<RunStartRequest> = {}): 
     prAuthor: "romain",
     headSha: "abc1234567",
     baseSha: "def1234567",
-    configHash: "0123456789abcdef",
-    config,
     ...overrides,
   };
 }
@@ -209,14 +229,27 @@ function signSlack(rawBody: string, timestamp: string): string {
     .digest("hex")}`;
 }
 
+// Interaction dedupe is global (processed_interactions): every test must use
+// a unique triggerId/actionTs (and viewId) or it silently dedupes as stale.
 async function postBlockAction(
   app: AppInstance,
-  input: { cycleId: string; headSha: string; action: "accept" | "request_changes"; actionTs: string; triggerId: string },
+  input: {
+    cycleId: string;
+    headSha: string;
+    action: "accept" | "request_changes";
+    actionTs: string;
+    triggerId: string;
+    userId?: string;
+    teamId?: string;
+    responseUrl?: string;
+  },
 ) {
   const payload = {
     type: "block_actions",
     trigger_id: input.triggerId,
-    user: { id: "U999" },
+    ...(input.teamId ? { team: { id: input.teamId } } : {}),
+    ...(input.responseUrl ? { response_url: input.responseUrl } : {}),
+    user: { id: input.userId ?? "U999" },
     actions: [
       {
         action_id: input.action === "accept" ? "feature_rec_accept" : "feature_rec_request_changes",
@@ -237,6 +270,101 @@ async function postBlockAction(
     },
     payload: rawBody,
   });
+}
+
+async function postViewSubmission(
+  app: AppInstance,
+  input: {
+    cycleId: string;
+    headSha: string;
+    viewId: string;
+    comment: string;
+    userId?: string;
+    teamId?: string;
+    responseUrl?: string;
+  },
+) {
+  const payload = {
+    type: "view_submission",
+    ...(input.teamId ? { team: { id: input.teamId } } : {}),
+    user: { id: input.userId ?? "U999" },
+    view: {
+      id: input.viewId,
+      hash: `${input.viewId}-hash`,
+      private_metadata: JSON.stringify({
+        cycleId: input.cycleId,
+        headSha: input.headSha,
+        responseUrl: input.responseUrl,
+      }),
+      state: { values: { comment: { value: { value: input.comment } } } },
+    },
+  };
+  const rawBody = `payload=${encodeURIComponent(JSON.stringify(payload))}`;
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  return app.inject({
+    method: "POST",
+    url: "/api/slack/interactivity",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      "x-slack-request-timestamp": timestamp,
+      "x-slack-signature": signSlack(rawBody, timestamp),
+    },
+    payload: rawBody,
+  });
+}
+
+async function postSlackEvent(app: AppInstance, body: Record<string, unknown>) {
+  const rawBody = JSON.stringify(body);
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  return app.inject({
+    method: "POST",
+    url: "/api/slack/events",
+    headers: {
+      "content-type": "application/json",
+      "x-slack-request-timestamp": timestamp,
+      "x-slack-signature": signSlack(rawBody, timestamp),
+    },
+    payload: rawBody,
+  });
+}
+
+function membershipEvent(input: {
+  type: "member_joined_channel" | "member_left_channel";
+  teamId: string;
+  user: string;
+  channel: string;
+  ts: string;
+}) {
+  return {
+    type: "event_callback",
+    team_id: input.teamId,
+    event: { type: input.type, user: input.user, channel: input.channel, event_ts: input.ts },
+  };
+}
+
+async function postCommand(
+  app: AppInstance,
+  input: { teamId: string; channelId: string; userId: string; text: string },
+) {
+  const rawBody = new URLSearchParams({
+    command: "/feature-rec",
+    team_id: input.teamId,
+    channel_id: input.channelId,
+    user_id: input.userId,
+    text: input.text,
+  }).toString();
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/slack/commands",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      "x-slack-request-timestamp": timestamp,
+      "x-slack-signature": signSlack(rawBody, timestamp),
+    },
+    payload: rawBody,
+  });
+  return { res, body: JSON.parse(res.body) as { response_type?: string; text?: string } };
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -263,7 +391,6 @@ try {
 
     assert.equal(first.created, true);
     assert.ok(first.attemptId);
-    assert.equal(first.cycle.config.slack.channel, "C0123");
     assert.equal(second.created, false);
     assert.equal(second.attemptId, null);
     assert.equal(first.cycle.id, second.cycle.id);
@@ -616,7 +743,7 @@ try {
       return false;
     };
     const app = makeApp(github, slack);
-    const start = makeStart(10, { headSha: "approver01", config: restrictedConfig });
+    const start = makeStart(10, { headSha: "approver01" });
     const created = await store.startCycle({ ...start, cycleKey: buildCycleKey(start) });
     assert.ok(created.attemptId);
     await store.transitionRunnerStatus({
@@ -697,6 +824,663 @@ try {
     assert.equal(staleResult.res.statusCode, 200);
     assert.equal(staleResult.body.stale, true);
     assert.equal((await store.getCycle(first.cycleId))?.status, "analyzing");
+  }
+
+  // --- Channel routing: resolver 0/1/many, ordering, failover, rejoin-to-back ---
+  {
+    const slack = makeSlackStub({ teamId: "TROUTE", channels: [] });
+    const slackClient = slack as never as SlackClient;
+
+    await assert.rejects(
+      resolveChannel(store, slackClient),
+      (err: unknown) =>
+        err instanceof ChannelResolutionError && err.message === SLACK_NO_CHANNEL_MESSAGE,
+    );
+
+    // Join events carry exact times; CA is the older introduction.
+    await store.recordChannelJoin({
+      teamId: "TROUTE",
+      channelId: "CA",
+      joinedAt: "2026-01-01T00:00:01.000Z",
+    });
+    await store.recordChannelJoin({
+      teamId: "TROUTE",
+      channelId: "CB",
+      joinedAt: "2026-01-01T00:00:02.000Z",
+    });
+    slack.channels = ["CA", "CB"];
+    assert.equal((await resolveChannel(store, slackClient)).channelId, "CA");
+
+    // Failover: removing the bot from CA promotes CB on the next post.
+    await store.recordChannelLeave({
+      teamId: "TROUTE",
+      channelId: "CA",
+      leftAt: "2026-01-01T00:00:03.000Z",
+    });
+    slack.channels = ["CB"];
+    assert.equal((await resolveChannel(store, slackClient)).channelId, "CB");
+
+    // Rejoin goes to the back of the queue: CB keeps the active slot.
+    await store.recordChannelJoin({
+      teamId: "TROUTE",
+      channelId: "CA",
+      joinedAt: "2026-01-01T00:00:04.000Z",
+    });
+    slack.channels = ["CA", "CB"];
+    assert.equal((await resolveChannel(store, slackClient)).channelId, "CB");
+
+    // Poll-seeded channel (no join event) orders by first_seen_at, after both.
+    slack.channels = ["CA", "CB", "CC"];
+    await resolveChannel(store, slackClient);
+    assert.deepEqual(
+      (await store.activeBotChannels("TROUTE")).map((channel) => channel.channelId),
+      ["CB", "CA", "CC"],
+    );
+
+    // Stale-poll guard: a join that lands after the snapshot must survive a
+    // sync whose channel list predates it.
+    await store.recordChannelJoin({
+      teamId: "TROUTE",
+      channelId: "CD",
+      joinedAt: new Date().toISOString(),
+    });
+    await store.syncBotChannels({
+      teamId: "TROUTE",
+      channelIds: ["CB"],
+      seenAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    assert.ok(
+      (await store.activeBotChannels("TROUTE")).some((channel) => channel.channelId === "CD"),
+    );
+
+    // A fresh poll is authoritative: channels missing from it are reaped.
+    slack.channels = ["CA", "CC"];
+    assert.equal((await resolveChannel(store, slackClient)).channelId, "CA");
+    assert.deepEqual(
+      (await store.activeBotChannels("TROUTE")).map((channel) => channel.channelId),
+      ["CA", "CC"],
+    );
+  }
+
+  // --- Shared tenant channel: repos share the active channel; mention default ---
+  {
+    const slack = makeSlackStub();
+    const app = makeApp(makeGithubStub(), slack);
+    const first = (await startRun(app, makeStart(20, { headSha: "shared0001" }))).body;
+    const second = (
+      await startRun(app, makeStart(21, { repo: "OtherRepo", headSha: "shared0002" }))
+    ).body;
+    assert.ok(first.cycleId && first.attemptId);
+    assert.ok(second.cycleId && second.attemptId);
+    // Advisory flag: a tenant with an active channel reports onboarded.
+    assert.equal(first.onboarded, true);
+    assert.equal(second.onboarded, true);
+    await postVideo(app, first.cycleId!, first.attemptId);
+    await postVideo(app, second.cycleId!, second.attemptId);
+    assert.deepEqual(slack.postValidationArgs, [
+      { channel: "C0123", mention: null },
+      { channel: "C0123", mention: null },
+    ]);
+    assert.deepEqual(slack.uploadVideoChannels, ["C0123", "C0123"]);
+  }
+
+  // --- Validation mention comes from the channel settings at post time ---
+  {
+    const slack = makeSlackStub({ teamId: "TMENTION", channels: ["CM1"] });
+    const app = makeApp(makeGithubStub(), slack);
+    await store.setMention({
+      teamId: "TMENTION",
+      channelId: "CM1",
+      mention: "<!subteam^S321|@design>",
+      updatedBy: "U1",
+    });
+    const start = (await startRun(app, makeStart(22, { headSha: "mention0001" }))).body;
+    await postVideo(app, start.cycleId!, start.attemptId);
+    assert.deepEqual(slack.postValidationArgs, [
+      { channel: "CM1", mention: "<!subteam^S321|@design>" },
+    ]);
+  }
+
+  // --- Events: challenge echo, bad signature, greetings by rank ---
+  {
+    const slack = makeSlackStub({ teamId: "TEVT", channels: [] });
+    const app = makeApp(makeGithubStub(), slack);
+
+    const challenge = await postSlackEvent(app, { type: "url_verification", challenge: "chal123" });
+    assert.equal(challenge.statusCode, 200);
+    assert.equal((JSON.parse(challenge.body) as { challenge?: string }).challenge, "chal123");
+
+    const badSig = await app.inject({
+      method: "POST",
+      url: "/api/slack/events",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-request-timestamp": String(Math.floor(Date.now() / 1000)),
+        "x-slack-signature": "v0=bad",
+      },
+      payload: JSON.stringify({ type: "url_verification", challenge: "nope" }),
+    });
+    assert.equal(badSig.statusCode, 401);
+
+    const join = (channel: string, ts: string, user = "UBOT") =>
+      postSlackEvent(
+        app,
+        membershipEvent({ type: "member_joined_channel", teamId: "TEVT", user, channel, ts }),
+      );
+    const leave = (channel: string, ts: string) =>
+      postSlackEvent(
+        app,
+        membershipEvent({
+          type: "member_left_channel",
+          teamId: "TEVT",
+          user: "UBOT",
+          channel,
+          ts,
+        }),
+      );
+
+    await join("CE1", "1710000001.000000");
+    assert.ok(await waitFor(async () => slack.postMessageCalls.length === 1));
+    assert.deepEqual(slack.postMessageCalls[0], { channel: "CE1", text: SLACK_GREETING_ACTIVE });
+
+    await join("CE2", "1710000002.000000");
+    assert.ok(await waitFor(async () => slack.postMessageCalls.length === 2));
+    assert.deepEqual(slack.postMessageCalls[1], {
+      channel: "CE2",
+      text: renderTemplate(SLACK_GREETING_NEXT_IN_LINE, { active_channel: "<#CE1>" }),
+    });
+
+    await join("CE3", "1710000003.000000");
+    assert.ok(await waitFor(async () => slack.postMessageCalls.length === 3));
+    assert.deepEqual(slack.postMessageCalls[2], {
+      channel: "CE3",
+      text: renderTemplate(SLACK_GREETING_QUEUED, { active_channel: "<#CE1>" }),
+    });
+
+    // Non-bot joins are dropped: no row, no greeting.
+    await join("CE4", "1710000004.000000", "UHUMAN");
+    await sleep(150);
+    assert.equal(slack.postMessageCalls.length, 3);
+    assert.equal(
+      (await store.activeBotChannels("TEVT")).some((channel) => channel.channelId === "CE4"),
+      false,
+    );
+
+    // Leaving a non-active channel promotes nothing.
+    await leave("CE3", "1710000005.000000");
+    await sleep(150);
+    assert.equal(slack.postMessageCalls.length, 3);
+
+    // Leaving the active channel notifies the promoted one.
+    await leave("CE1", "1710000006.000000");
+    assert.ok(await waitFor(async () => slack.postMessageCalls.length === 4));
+    assert.deepEqual(slack.postMessageCalls[3], { channel: "CE2", text: SLACK_PROMOTION_NOTICE });
+
+    // A join without event_ts still records the channel (falls back to now).
+    await postSlackEvent(app, {
+      type: "event_callback",
+      team_id: "TEVT",
+      event: { type: "member_joined_channel", user: "UBOT", channel: "CE5" },
+    });
+    assert.ok(
+      (await store.activeBotChannels("TEVT")).some((channel) => channel.channelId === "CE5"),
+    );
+
+    // Retried deliveries (same event_id) keep the idempotent membership write
+    // but must not greet twice. Counted per channel: CE5's greeting above is
+    // detached and may still be in flight, so a global count would be racy.
+    const ce6Greetings = () =>
+      slack.postMessageCalls.filter((message) => message.channel === "CE6").length;
+    const retried = {
+      ...membershipEvent({
+        type: "member_joined_channel" as const,
+        teamId: "TEVT",
+        user: "UBOT",
+        channel: "CE6",
+        ts: "1710000007.000000",
+      }),
+      event_id: "Ev0RETRY01",
+    };
+    await postSlackEvent(app, retried);
+    await postSlackEvent(app, retried);
+    assert.ok(await waitFor(async () => ce6Greetings() === 1));
+    await sleep(150);
+    assert.equal(ce6Greetings(), 1);
+    assert.ok(
+      (await store.activeBotChannels("TEVT")).some((channel) => channel.channelId === "CE6"),
+    );
+
+    // A delayed FIRST delivery of an old leave (fresh event_id, stale
+    // event_ts) for the active channel: the store ignores it, so the handler
+    // must not post a promotion notice for a promotion that never happened.
+    // CE5's greeting is detached, so settle it before taking a global baseline.
+    assert.ok(
+      await waitFor(
+        async () =>
+          slack.postMessageCalls.filter((message) => message.channel === "CE5").length === 1,
+      ),
+    );
+    const activeHead = (await store.activeBotChannels("TEVT"))[0];
+    const messagesBefore = slack.postMessageCalls.length;
+    await postSlackEvent(app, {
+      ...membershipEvent({
+        type: "member_left_channel" as const,
+        teamId: "TEVT",
+        user: "UBOT",
+        channel: activeHead.channelId,
+        ts: "1710000000.500000", // older than every recorded membership
+      }),
+      event_id: "Ev0STALELEAVE",
+    });
+    await sleep(150);
+    assert.equal(slack.postMessageCalls.length, messagesBefore);
+    assert.equal((await store.activeBotChannels("TEVT"))[0]?.channelId, activeHead.channelId);
+  }
+
+  // --- Commands: mention set/off/echo/bad-handle, approvers, status, usage ---
+  {
+    const slack = makeSlackStub({ teamId: "TCMD", channels: ["CCMD"] });
+    slack.usergroups = [{ id: "S777", handle: "product-team" }];
+    const app = makeApp(makeGithubStub(), slack);
+    const run = (text: string) =>
+      postCommand(app, { teamId: "TCMD", channelId: "CCMD", userId: "UCMD", text });
+
+    assert.equal((await run("mention")).body.text, "Mention: @here (default)");
+
+    const set = await run("mention @product-team <@U111|bob>");
+    assert.equal(
+      set.body.text,
+      "Validation requests in this channel will mention <!subteam^S777|@product-team> <@U111>.",
+    );
+    assert.equal(
+      (await store.getChannelSettings("TCMD", "CCMD"))?.mention,
+      "<!subteam^S777|@product-team> <@U111>",
+    );
+    assert.equal(
+      (await run("mention")).body.text,
+      "Mention: <!subteam^S777|@product-team> <@U111>",
+    );
+
+    const badHandle = await run("mention @nope");
+    assert.ok(badHandle.body.text?.startsWith("Unknown mention target @nope."));
+    assert.equal(
+      (await store.getChannelSettings("TCMD", "CCMD"))?.mention,
+      "<!subteam^S777|@product-team> <@U111>",
+    );
+
+    assert.equal(
+      (await run("mention @here")).body.text,
+      "Validation requests in this channel will mention <!here>.",
+    );
+    assert.equal((await store.getChannelSettings("TCMD", "CCMD"))?.mention, "<!here>");
+    assert.equal(
+      (await run("mention @here off")).body.text,
+      'Use "off" by itself: `/feature-rec mention off`.',
+    );
+    assert.equal((await store.getChannelSettings("TCMD", "CCMD"))?.mention, "<!here>");
+
+    assert.equal(
+      (await run("mention off")).body.text,
+      "Mention turned off for validation requests in this channel.",
+    );
+    assert.equal((await store.getChannelSettings("TCMD", "CCMD"))?.mention, "");
+    assert.equal((await run("mention")).body.text, "Mention: off");
+
+    assert.equal((await run("approvers")).body.text, "Approvers: everyone in the channel.");
+    assert.equal(
+      (await run("approvers @product-team <@U111|bob>")).body.text,
+      "Only <!subteam^S777>, <@U111> can approve.",
+    );
+    assert.deepEqual((await store.getChannelSettings("TCMD", "CCMD"))?.approvers, [
+      "S777",
+      "U111",
+    ]);
+    assert.ok((await run("approvers @nobody")).body.text?.startsWith("Unknown approver @nobody."));
+    assert.equal(
+      (await run("approvers everyone <@U111|bob>")).body.text,
+      'Use "everyone" by itself: `/feature-rec approvers everyone`.',
+    );
+    assert.deepEqual((await store.getChannelSettings("TCMD", "CCMD"))?.approvers, [
+      "S777",
+      "U111",
+    ]);
+    assert.equal(
+      (await run("approvers everyone")).body.text,
+      "Everyone in the channel can now approve.",
+    );
+    assert.equal((await store.getChannelSettings("TCMD", "CCMD"))?.approvers, null);
+
+    slack.channels = ["CCMD", "CCMD2"];
+    const status = (await run("status")).body.text ?? "";
+    assert.ok(status.includes("Validations go to <#CCMD>."));
+    assert.ok(status.includes("Mention: off"));
+    assert.ok(status.includes("Approvers: everyone in the channel."));
+    assert.ok(status.includes("If I'm removed from <#CCMD>, validations will move to <#CCMD2>."));
+
+    assert.ok((await run("wat")).body.text?.startsWith("Usage:"));
+    assert.ok((await run("")).body.text?.startsWith("Usage:"));
+
+    const badCommandSig = await app.inject({
+      method: "POST",
+      url: "/api/slack/commands",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "x-slack-request-timestamp": String(Math.floor(Date.now() / 1000)),
+        "x-slack-signature": "v0=bad",
+      },
+      payload: "team_id=TCMD&channel_id=CCMD&user_id=UCMD&text=status",
+    });
+    assert.equal(badCommandSig.statusCode, 401);
+
+    const missingTeam = "channel_id=CCMD&user_id=UCMD&text=status";
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const noTeam = await app.inject({
+      method: "POST",
+      url: "/api/slack/commands",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": signSlack(missingTeam, timestamp),
+      },
+      payload: missingTeam,
+    });
+    assert.equal(noTeam.statusCode, 400);
+  }
+
+  // --- Restricted approval: non-approver gets an ephemeral reply, member accepts ---
+  {
+    const github = makeGithubStub();
+    const slack = makeSlackStub();
+    slack.usergroupMembers = { S900: ["UMEMBER"] };
+    const app = makeApp(github, slack);
+    const start = (await startRun(app, makeStart(23, { headSha: "restrict01" }))).body;
+    await postVideo(app, start.cycleId!, start.attemptId);
+    await store.setApprovers({
+      teamId: "TAPPR",
+      channelId: "C0123",
+      approvers: ["S900"],
+      updatedBy: "UADMIN",
+    });
+
+    await postBlockAction(app, {
+      cycleId: start.cycleId!,
+      headSha: "restrict01",
+      action: "accept",
+      actionTs: "1710000000.000101",
+      triggerId: "TR1",
+      userId: "USTRANGER",
+      teamId: "TAPPR",
+      responseUrl: "https://hooks.slack.test/r1",
+    });
+    assert.ok(await waitFor(async () => slack.ephemeralCalls.length === 1));
+    assert.deepEqual(slack.ephemeralCalls[0], {
+      url: "https://hooks.slack.test/r1",
+      text: "Only <!subteam^S900> can approve.",
+    });
+    await sleep(150);
+    assert.equal(github.acceptCalls, 0);
+    assert.equal((await store.getCycle(start.cycleId!))?.status, "pending_validation");
+
+    await postBlockAction(app, {
+      cycleId: start.cycleId!,
+      headSha: "restrict01",
+      action: "accept",
+      actionTs: "1710000000.000102",
+      triggerId: "TR2",
+      userId: "UMEMBER",
+      teamId: "TAPPR",
+      responseUrl: "https://hooks.slack.test/r2",
+    });
+    assert.ok(
+      await waitFor(async () => (await store.getCycle(start.cycleId!))?.status === "accepted"),
+    );
+    await sleep(150);
+    assert.equal(github.acceptCalls, 1);
+    assert.equal(slack.ephemeralCalls.length, 1);
+  }
+
+  // --- Request-changes submissions: empty comment, unauthorized, rejection ---
+  {
+    const github = makeGithubStub();
+    const slack = makeSlackStub();
+    slack.usergroupMembers = { S900: ["UMEMBER"] };
+    const app = makeApp(github, slack);
+    const start = (await startRun(app, makeStart(26, { headSha: "reject0001" }))).body;
+    await postVideo(app, start.cycleId!, start.attemptId);
+    // TAPPR/C0123 approvers were set to ["S900"] in the restricted-approval block.
+
+    const emptyComment = await postViewSubmission(app, {
+      cycleId: start.cycleId!,
+      headSha: "reject0001",
+      viewId: "V1",
+      comment: "  ",
+      userId: "UMEMBER",
+      teamId: "TAPPR",
+    });
+    assert.equal(
+      (JSON.parse(emptyComment.body) as { response_action?: string }).response_action,
+      "errors",
+    );
+
+    // Unauthorized submission replies through the response_url stashed in the
+    // modal's private_metadata (view payloads carry none of their own).
+    await postViewSubmission(app, {
+      cycleId: start.cycleId!,
+      headSha: "reject0001",
+      viewId: "V2",
+      comment: "not premium enough",
+      userId: "USTRANGER",
+      teamId: "TAPPR",
+      responseUrl: "https://hooks.slack.test/r3",
+    });
+    assert.ok(await waitFor(async () => slack.ephemeralCalls.length === 1));
+    assert.deepEqual(slack.ephemeralCalls[0], {
+      url: "https://hooks.slack.test/r3",
+      text: "Only <!subteam^S900> can approve.",
+    });
+    await sleep(150);
+    assert.equal(github.rejectCalls, 0);
+    assert.equal((await store.getCycle(start.cycleId!))?.status, "pending_validation");
+
+    await postViewSubmission(app, {
+      cycleId: start.cycleId!,
+      headSha: "reject0001",
+      viewId: "V3",
+      comment: "not premium enough",
+      userId: "UMEMBER",
+      teamId: "TAPPR",
+      responseUrl: "https://hooks.slack.test/r4",
+    });
+    assert.ok(
+      await waitFor(async () => (await store.getCycle(start.cycleId!))?.status === "rejected"),
+    );
+    await sleep(150);
+    assert.equal(github.rejectCalls, 1);
+    assert.equal(slack.finalizeCalls.at(-1)?.state, "rejected");
+  }
+
+  // --- Real SlackClient.listBotChannels: pagination and ext-shared exclusion ---
+  {
+    const previousFetch = globalThis.fetch;
+    const pages = [
+      {
+        ok: true,
+        channels: [{ id: "CP1" }, { id: "CP2", is_ext_shared: true }],
+        response_metadata: { next_cursor: "cur2" },
+      },
+      {
+        ok: true,
+        channels: [{ id: "CP3", is_pending_ext_shared: true }, { id: "CP4" }],
+        response_metadata: { next_cursor: "" },
+      },
+    ];
+    const cursors: Array<string | undefined> = [];
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { cursor?: string };
+      cursors.push(body.cursor);
+      return new Response(JSON.stringify(pages[cursors.length - 1]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      const client = new SlackClient({ ...env, slackBotToken: "xoxb-test" });
+      assert.deepEqual(await client.listBotChannels(), ["CP1", "CP4"]);
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+    assert.deepEqual(cursors, [undefined, "cur2"]);
+  }
+
+  // --- Real SlackClient.isApprover: direct ids skip the API, groups expand ---
+  {
+    const previousFetch = globalThis.fetch;
+    const usergroupCalls: string[] = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      usergroupCalls.push(String(url));
+      const body = init?.body ? (JSON.parse(String(init.body)) as { usergroup?: string }) : {};
+      assert.equal(body.usergroup, "S123");
+      return new Response(JSON.stringify({ ok: true, users: ["U1", "U2"] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      const client = new SlackClient({ ...env, slackBotToken: "xoxb-test" });
+      assert.equal(await client.isApprover(null, "Uany"), true);
+      assert.equal(await client.isApprover(["U9"], undefined), false);
+      assert.equal(await client.isApprover(["U9"], "U9"), true);
+      assert.equal(await client.isApprover(["S123"], "U1"), true);
+      assert.equal(await client.isApprover(["S123"], "U7"), false);
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+    assert.equal(usergroupCalls.length, 2);
+  }
+
+  // --- Video with no review channel: 422, actionable check run, /failed no-ops ---
+  {
+    const github = makeGithubStub();
+    const slack = makeSlackStub({ teamId: "TEMPTY", channels: [] });
+    const app = makeApp(github, slack);
+    const start = (await startRun(app, makeStart(24, { headSha: "nochannel1" }))).body;
+    // Advisory flag: an unboarded tenant is announced at start so the runner
+    // can fail frontend-visible PRs before rendering.
+    assert.equal(start.onboarded, false);
+
+    const video = await postVideo(app, start.cycleId!, start.attemptId);
+    assert.equal(video.res.statusCode, 422);
+    assert.equal(video.body.error, "no_slack_channel");
+    // Machine-readable settlement: the backend already failed the cycle and
+    // wrote the check run, so the runner must skip its own failure report.
+    assert.equal(video.body.settled, true);
+    assert.equal((await store.getCycle(start.cycleId!))?.status, "failed");
+    assert.equal(github.checkRuns.get(start.checkRunId!)?.conclusion, "failure");
+    assert.equal(slack.uploadVideoCalls, 0);
+
+    const failed = await postResult(app, start.cycleId!, "failed", { attemptId: start.attemptId });
+    assert.equal(failed.body.stale, true);
+    assert.equal(github.checkRuns.get(start.checkRunId!)?.conclusion, "failure");
+  }
+
+  // --- Superseded while resolving the channel: no failure written over neutral ---
+  {
+    const github = makeGithubStub();
+    const slack = makeSlackStub({ teamId: "TRACE", channels: [] });
+    const app = makeApp(github, slack);
+    const startA = (await startRun(app, makeStart(25, { headSha: "race0001aa" }))).body;
+
+    // The membership poll starts a newer head before reporting no channels,
+    // so A is superseded mid-resolution.
+    slack.listBotChannels = async () => {
+      await startRun(app, makeStart(25, { headSha: "race0002bb" }));
+      return [];
+    };
+    const video = await postVideo(app, startA.cycleId!, startA.attemptId);
+    assert.equal(video.res.statusCode, 200);
+    assert.equal(video.body.stale, true);
+    assert.equal((await store.getCycle(startA.cycleId!))?.status, "superseded");
+    assert.ok(
+      await waitFor(
+        async () => github.checkRuns.get(startA.checkRunId!)?.conclusion === "neutral",
+      ),
+    );
+  }
+
+  // --- Stale membership data cannot resurrect a newer leave ---
+  {
+    // A poll snapshot taken BEFORE the leave still lists the channel; the
+    // sweep must not clear the newer left_at.
+    await store.recordChannelJoin({
+      teamId: "TSTALE",
+      channelId: "CSTALE",
+      joinedAt: "2026-07-22T10:00:00.000Z",
+    });
+    await store.recordChannelLeave({
+      teamId: "TSTALE",
+      channelId: "CSTALE",
+      leftAt: "2026-07-22T10:05:00.000Z",
+    });
+    await store.syncBotChannels({
+      teamId: "TSTALE",
+      channelIds: ["CSTALE"],
+      seenAt: "2026-07-22T10:04:00.000Z",
+    });
+    assert.equal((await store.activeBotChannels("TSTALE")).length, 0);
+
+    // An out-of-order join event (older than the leave, e.g. a delayed
+    // retry) must not resurrect it either.
+    await store.recordChannelJoin({
+      teamId: "TSTALE",
+      channelId: "CSTALE",
+      joinedAt: "2026-07-22T10:03:00.000Z",
+    });
+    assert.equal((await store.activeBotChannels("TSTALE")).length, 0);
+
+    // A genuinely fresh poll (snapshot after the leave) revives the channel
+    // as a NEW introduction with reset ordering.
+    await store.syncBotChannels({
+      teamId: "TSTALE",
+      channelIds: ["CSTALE"],
+      seenAt: "2026-07-22T10:10:00.000Z",
+    });
+    const revived = await store.activeBotChannels("TSTALE");
+    assert.equal(revived.length, 1);
+    assert.equal(revived[0].joinedAt, null);
+    assert.equal(revived[0].firstSeenAt, "2026-07-22T10:10:00.000Z");
+
+    // The mirror race: a delayed retry of an OLD leave event (older than the
+    // latest observed membership) must not deactivate the newer rejoin.
+    await store.recordChannelLeave({
+      teamId: "TSTALE",
+      channelId: "CSTALE",
+      leftAt: "2026-07-22T10:05:00.000Z",
+    });
+    assert.equal((await store.activeBotChannels("TSTALE")).length, 1);
+
+    // A genuinely new leave still lands.
+    await store.recordChannelLeave({
+      teamId: "TSTALE",
+      channelId: "CSTALE",
+      leftAt: "2026-07-22T10:11:00.000Z",
+    });
+    assert.equal((await store.activeBotChannels("TSTALE")).length, 0);
+  }
+
+  // --- Advisory onboarding probe failure cannot stall the start ---
+  {
+    // The Slack sweep throwing must not 500 the start: the cycle would stay
+    // `analyzing` with no attemptId returned, and retries would exit as
+    // duplicates forever. Unknown onboarding → flag omitted, start succeeds.
+    const slack = makeSlackStub({ teamId: "TPROBE", channels: [] });
+    slack.listBotChannels = async () => {
+      throw new Error("slack is down");
+    };
+    const app = makeApp(makeGithubStub(), slack);
+    const start = await startRun(app, makeStart(26, { headSha: "probe00001" }));
+    assert.equal(start.res.statusCode, 200);
+    assert.ok(start.body.attemptId);
+    assert.equal(start.body.onboarded, undefined);
   }
 
   // --- Writes after close() reject (pg pool, not a synchronous throw) ---
