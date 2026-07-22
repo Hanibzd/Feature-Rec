@@ -364,6 +364,11 @@ export class PostgresCycleStore implements CycleStore {
       .where("team_id", "=", input.teamId)
       .where("channel_id", "=", input.channelId)
       .where("left_at", "is", null)
+      // A leave older than the latest observed membership is a delayed retry
+      // (Delayed Events redeliver for up to 24h) arriving after a rejoin or a
+      // newer poll: it must not deactivate the current membership. Skipping is
+      // safe — if the bot really is gone, the next poll reaps the row.
+      .where("last_seen_at", "<=", new Date(input.leftAt))
       .execute();
   }
 

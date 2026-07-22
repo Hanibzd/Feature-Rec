@@ -1032,8 +1032,10 @@ try {
     );
 
     // Retried deliveries (same event_id) keep the idempotent membership write
-    // but must not greet twice.
-    const greetingsBefore = slack.postMessageCalls.length;
+    // but must not greet twice. Counted per channel: CE5's greeting above is
+    // detached and may still be in flight, so a global count would be racy.
+    const ce6Greetings = () =>
+      slack.postMessageCalls.filter((message) => message.channel === "CE6").length;
     const retried = {
       ...membershipEvent({
         type: "member_joined_channel" as const,
@@ -1046,8 +1048,9 @@ try {
     };
     await postSlackEvent(app, retried);
     await postSlackEvent(app, retried);
+    assert.ok(await waitFor(async () => ce6Greetings() === 1));
     await sleep(150);
-    assert.equal(slack.postMessageCalls.length, greetingsBefore + 1);
+    assert.equal(ce6Greetings(), 1);
     assert.ok(
       (await store.activeBotChannels("TEVT")).some((channel) => channel.channelId === "CE6"),
     );
@@ -1428,6 +1431,23 @@ try {
     assert.equal(revived.length, 1);
     assert.equal(revived[0].joinedAt, null);
     assert.equal(revived[0].firstSeenAt, "2026-07-22T10:10:00.000Z");
+
+    // The mirror race: a delayed retry of an OLD leave event (older than the
+    // latest observed membership) must not deactivate the newer rejoin.
+    await store.recordChannelLeave({
+      teamId: "TSTALE",
+      channelId: "CSTALE",
+      leftAt: "2026-07-22T10:05:00.000Z",
+    });
+    assert.equal((await store.activeBotChannels("TSTALE")).length, 1);
+
+    // A genuinely new leave still lands.
+    await store.recordChannelLeave({
+      teamId: "TSTALE",
+      channelId: "CSTALE",
+      leftAt: "2026-07-22T10:11:00.000Z",
+    });
+    assert.equal((await store.activeBotChannels("TSTALE")).length, 0);
   }
 
   // --- Advisory onboarding probe failure cannot stall the start ---
