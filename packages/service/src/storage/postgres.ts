@@ -284,7 +284,7 @@ export class PostgresCycleStore implements CycleStore {
 
       let missing = trx
         .updateTable("bot_channels")
-        .set({ left_at: input.seenAt })
+        .set({ left_at: input.seenAt, last_left_at: input.seenAt })
         .where("team_id", "=", input.teamId)
         .where("left_at", "is", null)
         .where("last_seen_at", "<", new Date(input.seenAt));
@@ -331,13 +331,19 @@ export class PostgresCycleStore implements CycleStore {
           // Monotonic: a delayed old join event must never move the latest
           // membership observation backward.
           last_seen_at: sql`greatest(bot_channels.last_seen_at, excluded.last_seen_at)`,
-          // Rejoin restarts ordering at the event time; an active channel keeps
-          // its known ordering (retried deliveries and poll-seeded rows only
-          // fill a missing joined_at, never move an established one). A join
-          // event OLDER than the recorded leave (out-of-order or delayed retry
-          // delivery) must not resurrect the channel.
+          // Rejoin restarts ordering at the event time. For an active,
+          // poll-seeded row, fill the exact time only when the event belongs to
+          // the current membership generation; last_left_at remains available
+          // after a poll clears left_at. Established ordering never moves.
           joined_at: sql`case
-            when bot_channels.left_at is null then coalesce(bot_channels.joined_at, excluded.joined_at)
+            when bot_channels.left_at is null then
+              case
+                when bot_channels.joined_at is not null then bot_channels.joined_at
+                when bot_channels.last_left_at is null
+                  or bot_channels.last_left_at < excluded.joined_at
+                  then excluded.joined_at
+                else null
+              end
             when bot_channels.left_at >= excluded.joined_at then bot_channels.joined_at
             else excluded.joined_at end`,
           first_seen_at: sql`case
@@ -359,7 +365,7 @@ export class PostgresCycleStore implements CycleStore {
   }): Promise<boolean> {
     const result = await this.#db
       .updateTable("bot_channels")
-      .set({ left_at: input.leftAt })
+      .set({ left_at: input.leftAt, last_left_at: input.leftAt })
       .where("team_id", "=", input.teamId)
       .where("channel_id", "=", input.channelId)
       .where("left_at", "is", null)

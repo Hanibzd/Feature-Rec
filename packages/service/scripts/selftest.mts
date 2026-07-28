@@ -1470,6 +1470,65 @@ try {
     assert.equal((await store.activeBotChannels("TSTALE")).length, 0);
   }
 
+  // --- Delayed joins are assigned to the correct membership generation ---
+  {
+    // A leaves, B becomes older, then a poll observes A's rejoin. The poll
+    // resets A's ordering but retains the 10:05 leave as a generation boundary.
+    await store.recordChannelJoin({
+      teamId: "TGEN",
+      channelId: "CGENA",
+      joinedAt: "2026-07-22T10:00:00.000Z",
+    });
+    await store.recordChannelLeave({
+      teamId: "TGEN",
+      channelId: "CGENA",
+      leftAt: "2026-07-22T10:05:00.000Z",
+    });
+    await store.recordChannelJoin({
+      teamId: "TGEN",
+      channelId: "CGENB",
+      joinedAt: "2026-07-22T10:08:00.000Z",
+    });
+    await store.syncBotChannels({
+      teamId: "TGEN",
+      channelIds: ["CGENA", "CGENB"],
+      seenAt: "2026-07-22T10:10:00.000Z",
+    });
+    assert.deepEqual(
+      (await store.activeBotChannels("TGEN")).map((channel) => channel.channelId),
+      ["CGENB", "CGENA"],
+    );
+
+    // A delayed join from A's OLD membership predates the retained leave and
+    // must not restore A's old queue position.
+    await store.recordChannelJoin({
+      teamId: "TGEN",
+      channelId: "CGENA",
+      joinedAt: "2026-07-22T10:03:00.000Z",
+    });
+    assert.deepEqual(
+      (await store.activeBotChannels("TGEN")).map((channel) => channel.channelId),
+      ["CGENB", "CGENA"],
+    );
+    assert.equal(
+      (await store.activeBotChannels("TGEN")).find(
+        (channel) => channel.channelId === "CGENA",
+      )?.joinedAt,
+      null,
+    );
+
+    // A genuinely delayed event from the CURRENT membership is newer than the
+    // leave boundary, so it may refine the poll fallback to the exact join time.
+    await store.recordChannelJoin({
+      teamId: "TGEN",
+      channelId: "CGENA",
+      joinedAt: "2026-07-22T10:07:00.000Z",
+    });
+    const generationOrdered = await store.activeBotChannels("TGEN");
+    assert.equal(generationOrdered[0].channelId, "CGENA");
+    assert.equal(generationOrdered[0].joinedAt, "2026-07-22T10:07:00.000Z");
+  }
+
   // --- last_seen_at is monotonic: an older concurrent poll cannot move it back ---
   {
     // Join observed at 11:00, then an older poll (snapshot 10:55) lands late.

@@ -45,7 +45,7 @@ hourly for 24 hours. Apps below 1,000 events/hour are exempt from auto-disable, 
 a down backend returning 5xx cannot disable this subscription.
 - Reinstall the app after changing scopes.
 
-### Database (two Kysely migrations)
+### Database (three Kysely migrations)
 
 ```text
 bot_channels
@@ -55,6 +55,7 @@ bot_channels
   first_seen_at  timestamptz        -- polling fallback
   last_seen_at   timestamptz
   left_at        timestamptz NULL   -- set on leave event or missing poll result
+  last_left_at   timestamptz NULL   -- retained generation boundary after rejoin
 
 channel_settings
   team_id        text               -- PK (team_id, channel_id)
@@ -71,7 +72,9 @@ workspace, so cross-tenant collisions are structurally impossible. Order by
 `coalesce(joined_at, first_seen_at)`, then `channel_id`. A channel is active
 when `left_at IS NULL` and the latest membership poll contains it. Rejoining resets
 its ordering timestamps, making it a new introduction that cannot steal the active
-slot.
+slot. `last_left_at` survives that reset so a delayed join older than the previous
+leave cannot restore the prior membership's queue position, while a genuinely
+delayed join newer than the leave can still supply the exact rejoin time.
 
 ### Channel resolution (`packages/service/src/channels.ts`)
 
@@ -229,4 +232,3 @@ admin-review friction in security-conscious workspaces; prepare onboarding
 documentation for it.
 - **Rate limits:** One `users.conversations` sweep per validation post is well below
 Slack's tier limits; the DB is sufficient cache.
-

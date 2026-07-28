@@ -37,6 +37,9 @@ export interface BotChannelsTable {
   first_seen_at: ColumnType<Date, string, string>;
   last_seen_at: ColumnType<Date, string, string>;
   left_at: ColumnType<Date | null, string | null | undefined, string | null>;
+  // Retained after left_at is cleared so delayed joins can be assigned to the
+  // correct membership generation.
+  last_left_at: ColumnType<Date | null, string | null | undefined, string | null>;
 }
 
 export interface ChannelSettingsTable {
