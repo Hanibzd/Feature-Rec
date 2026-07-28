@@ -44,7 +44,6 @@ The repository is a pnpm monorepo with these main pieces:
 | `packages/cli` | Renderer CLI: analyze a UI change, generate or reuse a Remotion scene, render video, and write release artifacts. |
 | `packages/video` | Remotion project used to render the generated scenes. |
 | `fixtures` | Example before/after UI changes that can render locally without external setup. |
-| `apps/web` | Small Next.js sample app whose UI code is used by the fixtures. It is not part of the pnpm workspace. |
 | `examples` | Example GitHub Actions workflow for a target repository. |
 
 Onboarding a repository takes three actions, with no configuration file:
