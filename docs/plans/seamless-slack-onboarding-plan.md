@@ -79,11 +79,11 @@ slot.
 
 1. Find the tenant. Today, use the bot token's team from cached `auth.test`. Later,
   replace only this line with repo→tenant lookup.
-2. Page through `users.conversations` for public and private channels. Exclude
-  externally shared or pending Slack Connect channels (`is_ext_shared` / pending):
-   they must not leak PR titles or videos outside the organization. Sync the rest into
-   `bot_channels`: upsert first/last seen, mark missing rows left, and reset ordering
-   on rejoin.
+2. Page through `users.conversations` for public and private channels — membership
+   is honored exactly as reported, with no shared-channel filtering (the setup guide
+   warns against inviting the bot to Slack Connect channels). Sync into
+   `bot_channels`: upsert first/last seen (monotonic — an older poll never moves
+   `last_seen_at` backward), mark missing rows left, and reset ordering on rejoin.
 3. Return that tenant's oldest active channel.
 4. If none exists, throw `ChannelResolutionError` and write this into the check run:
   “Invite @Feature-Rec to your Slack review channel, then re-run.”
@@ -215,8 +215,9 @@ through the same check-run error path until the reinstall happens.
 
 - **Missed join events:** First-seen reconciliation may use observation order instead
 of invite order, but stays deterministic.
-- **Bot in an externally shared channel:** Exclude it from routing; the greeting may
-explain why.
+- **Bot in an externally shared channel:** No filtering — membership is the routing
+decision, so validations WILL post there. Documented as an operator warning: never
+invite `@Feature-Rec` to Slack Connect channels.
 - **Membership-event privacy:** `member_joined_channel` fires for every
 user entering a bot channel. Drop non-bot events immediately and never log their
 payloads.

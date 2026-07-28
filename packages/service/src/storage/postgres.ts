@@ -257,7 +257,10 @@ export class PostgresCycleStore implements CycleStore {
           )
           .onConflict((oc) =>
             oc.columns(["team_id", "channel_id"]).doUpdateSet({
-              last_seen_at: (eb) => eb.ref("excluded.last_seen_at"),
+              // Monotonic: an older concurrent poll must never move the
+              // latest membership observation backward (the leave guard
+              // compares against it).
+              last_seen_at: sql`greatest(bot_channels.last_seen_at, excluded.last_seen_at)`,
               // Rejoin after a leave is a new introduction: reset ordering so
               // the channel cannot steal the active slot. A leave recorded at
               // or after the poll snapshot (excluded.last_seen_at = seenAt) is
@@ -325,7 +328,9 @@ export class PostgresCycleStore implements CycleStore {
       })
       .onConflict((oc) =>
         oc.columns(["team_id", "channel_id"]).doUpdateSet({
-          last_seen_at: (eb) => eb.ref("excluded.last_seen_at"),
+          // Monotonic: a delayed old join event must never move the latest
+          // membership observation backward.
+          last_seen_at: sql`greatest(bot_channels.last_seen_at, excluded.last_seen_at)`,
           // Rejoin restarts ordering at the event time; an active channel keeps
           // its known ordering (retried deliveries and poll-seeded rows only
           // fill a missing joined_at, never move an established one). A join

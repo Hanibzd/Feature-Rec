@@ -31,9 +31,10 @@ All repos in a Slack workspace share one review channel: the channel where the b
 introduced. If the bot is in several channels, the oldest introduction wins; removing it from the
 active channel promotes the next oldest, and the promoted channel is notified. Rejoining a channel
 puts it at the back of the queue. The channel is resolved when each validation is posted — never
-from cached configuration — and externally shared or pending Slack Connect channels are excluded
-so PR titles and videos cannot leak outside the organization. Every message identifies its repo as
-`owner/repo#N`.
+from cached configuration. Membership is honored exactly as reported by Slack, with no
+shared-channel filtering. **Do not invite `@Feature-Rec` to externally shared (Slack Connect)
+channels**: validation videos and PR information will be posted there, visible to the external
+organization. Every message identifies its repo as `owner/repo#N`.
 
 When the bot joins a channel it greets with its rank: the active channel gets "Connected,
 validation requests will appear in this channel"; later channels are told where validations
@@ -216,7 +217,9 @@ SLACK_SIGNING_SECRET=...
 ```
 
 Interactivity, events, and commands all use the same signing secret; no other environment
-variables are needed. Finally, invite the bot to the review channel.
+variables are needed. Finally, invite the bot to the review channel. Never invite it to an
+externally shared (Slack Connect) channel: validation videos and PR information would be visible
+to the external organization.
 
 ## Demo Repo Setup
 

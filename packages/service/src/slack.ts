@@ -112,11 +112,7 @@ function validationBlocks(cycle: CycleRecord, mention: string | null): unknown[]
 }
 
 type ConversationsPage = {
-  channels?: Array<{
-    id: string;
-    is_ext_shared?: boolean;
-    is_pending_ext_shared?: boolean;
-  }>;
+  channels?: Array<{ id: string }>;
   response_metadata?: { next_cursor?: string };
 };
 
@@ -147,9 +143,12 @@ export class SlackClient {
     return this.#identity;
   }
 
-  // Channels the bot is a member of, excluding externally shared or pending
-  // Slack Connect channels: they must not leak PR titles or videos outside
-  // the organization.
+  // Every channel the bot is a member of, as reported by users.conversations.
+  // No shared-channel filtering: inviting the bot IS the routing decision, so
+  // membership is honored as-is. Consequence (documented in the setup guide):
+  // do not invite @Feature-Rec to externally shared (Slack Connect) channels —
+  // validation videos and PR information would be posted where an external
+  // organization can see them.
   async listBotChannels(): Promise<string[]> {
     const channelIds: string[] = [];
     let cursor: string | undefined;
@@ -161,7 +160,6 @@ export class SlackClient {
         ...(cursor ? { cursor } : {}),
       });
       for (const channel of page.channels ?? []) {
-        if (channel.is_ext_shared || channel.is_pending_ext_shared) continue;
         channelIds.push(channel.id);
       }
       cursor = page.response_metadata?.next_cursor || undefined;

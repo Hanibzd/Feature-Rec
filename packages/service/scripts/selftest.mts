@@ -1299,7 +1299,10 @@ try {
     assert.equal(slack.finalizeCalls.at(-1)?.state, "rejected");
   }
 
-  // --- Real SlackClient.listBotChannels: pagination and ext-shared exclusion ---
+  // --- Real SlackClient.listBotChannels: pagination, membership as reported ---
+  // No shared-channel filtering: every channel users.conversations reports is
+  // returned, externally shared and pending ones included (the setup guide
+  // warns against inviting the bot to Slack Connect channels).
   {
     const previousFetch = globalThis.fetch;
     const pages = [
@@ -1325,7 +1328,7 @@ try {
     }) as typeof fetch;
     try {
       const client = new SlackClient({ ...env, slackBotToken: "xoxb-test" });
-      assert.deepEqual(await client.listBotChannels(), ["CP1", "CP4"]);
+      assert.deepEqual(await client.listBotChannels(), ["CP1", "CP2", "CP3", "CP4"]);
     } finally {
       globalThis.fetch = previousFetch;
     }
@@ -1465,6 +1468,44 @@ try {
       leftAt: "2026-07-22T10:11:00.000Z",
     });
     assert.equal((await store.activeBotChannels("TSTALE")).length, 0);
+  }
+
+  // --- last_seen_at is monotonic: an older concurrent poll cannot move it back ---
+  {
+    // Join observed at 11:00, then an older poll (snapshot 10:55) lands late.
+    await store.recordChannelJoin({
+      teamId: "TMONO",
+      channelId: "CMONO",
+      joinedAt: "2026-07-22T11:00:00.000Z",
+    });
+    await store.syncBotChannels({
+      teamId: "TMONO",
+      channelIds: ["CMONO"],
+      seenAt: "2026-07-22T10:55:00.000Z",
+    });
+    // Probe: if the older poll had regressed last_seen_at to 10:55, this
+    // leave (10:57) would apply. The monotonic observation (11:00) keeps the
+    // delayed leave ignored and the channel active.
+    assert.equal(
+      await store.recordChannelLeave({
+        teamId: "TMONO",
+        channelId: "CMONO",
+        leftAt: "2026-07-22T10:57:00.000Z",
+      }),
+      false,
+    );
+    assert.equal((await store.activeBotChannels("TMONO")).length, 1);
+
+    // A leave newer than every observation still applies.
+    assert.equal(
+      await store.recordChannelLeave({
+        teamId: "TMONO",
+        channelId: "CMONO",
+        leftAt: "2026-07-22T11:01:00.000Z",
+      }),
+      true,
+    );
+    assert.equal((await store.activeBotChannels("TMONO")).length, 0);
   }
 
   // --- Advisory onboarding probe failure cannot stall the start ---
