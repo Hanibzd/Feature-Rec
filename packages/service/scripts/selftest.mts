@@ -344,7 +344,13 @@ function membershipEvent(input: {
 
 async function postCommand(
   app: AppInstance,
-  input: { teamId: string; channelId: string; userId: string; text: string },
+  input: {
+    teamId: string;
+    channelId: string;
+    userId: string;
+    text: string;
+    responseUrl: string;
+  },
 ) {
   const rawBody = new URLSearchParams({
     command: "/feature-rec",
@@ -352,9 +358,10 @@ async function postCommand(
     channel_id: input.channelId,
     user_id: input.userId,
     text: input.text,
+    response_url: input.responseUrl,
   }).toString();
   const timestamp = String(Math.floor(Date.now() / 1000));
-  const res = await app.inject({
+  return app.inject({
     method: "POST",
     url: "/api/slack/commands",
     headers: {
@@ -364,7 +371,6 @@ async function postCommand(
     },
     payload: rawBody,
   });
-  return { res, body: JSON.parse(res.body) as { response_type?: string; text?: string } };
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1082,8 +1088,27 @@ try {
     const slack = makeSlackStub({ teamId: "TCMD", channels: ["CCMD"] });
     slack.usergroups = [{ id: "S777", handle: "product-team" }];
     const app = makeApp(makeGithubStub(), slack);
-    const run = (text: string) =>
-      postCommand(app, { teamId: "TCMD", channelId: "CCMD", userId: "UCMD", text });
+    let commandNumber = 0;
+    const run = async (text: string) => {
+      commandNumber += 1;
+      const responseUrl = `https://hooks.slack.test/command/${commandNumber}`;
+      const res = await postCommand(app, {
+        teamId: "TCMD",
+        channelId: "CCMD",
+        userId: "UCMD",
+        text,
+        responseUrl,
+      });
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.body, "");
+      assert.ok(
+        await waitFor(async () =>
+          slack.ephemeralCalls.some((message) => message.url === responseUrl),
+        ),
+      );
+      const message = slack.ephemeralCalls.find((candidate) => candidate.url === responseUrl);
+      return { res, body: { response_type: "ephemeral", text: message?.text } };
+    };
 
     assert.equal((await run("mention")).body.text, "Mention: @here (default)");
 
@@ -1160,6 +1185,52 @@ try {
     assert.ok((await run("wat")).body.text?.startsWith("Usage:"));
     assert.ok((await run("")).body.text?.startsWith("Usage:"));
 
+    // The ack must not wait for the status command's Slack membership sweep.
+    let releaseStatus: (() => void) | undefined;
+    const statusGate = new Promise<void>((resolve) => {
+      releaseStatus = resolve;
+    });
+    const listBotChannels = slack.listBotChannels;
+    slack.listBotChannels = async () => {
+      await statusGate;
+      return listBotChannels();
+    };
+    const slowResponseUrl = "https://hooks.slack.test/command/slow-status";
+    const slowAck = await Promise.race([
+      postCommand(app, {
+        teamId: "TCMD",
+        channelId: "CCMD",
+        userId: "UCMD",
+        text: "status",
+        responseUrl: slowResponseUrl,
+      }),
+      sleep(250).then(() => null),
+    ]);
+    assert.ok(slowAck, "slash command ack waited for status work");
+    assert.equal(slowAck.statusCode, 200);
+    assert.equal(slowAck.body, "");
+    assert.equal(
+      slack.ephemeralCalls.some((message) => message.url === slowResponseUrl),
+      false,
+    );
+    releaseStatus?.();
+    assert.ok(
+      await waitFor(async () =>
+        slack.ephemeralCalls.some((message) => message.url === slowResponseUrl),
+      ),
+    );
+    slack.listBotChannels = listBotChannels;
+
+    // Unexpected command failures still produce a useful ephemeral response.
+    slack.listBotChannels = async () => {
+      throw new Error("command dependency failed");
+    };
+    assert.equal(
+      (await run("status")).body.text,
+      "Something went wrong. Please try again.",
+    );
+    slack.listBotChannels = listBotChannels;
+
     const badCommandSig = await app.inject({
       method: "POST",
       url: "/api/slack/commands",
@@ -1172,7 +1243,8 @@ try {
     });
     assert.equal(badCommandSig.statusCode, 401);
 
-    const missingTeam = "channel_id=CCMD&user_id=UCMD&text=status";
+    const missingTeam =
+      "channel_id=CCMD&user_id=UCMD&text=status&response_url=https%3A%2F%2Fhooks.slack.test%2Fcommand%2Fmissing-team";
     const timestamp = String(Math.floor(Date.now() / 1000));
     const noTeam = await app.inject({
       method: "POST",
@@ -1185,6 +1257,20 @@ try {
       payload: missingTeam,
     });
     assert.equal(noTeam.statusCode, 400);
+
+    const missingResponseUrl = "team_id=TCMD&channel_id=CCMD&user_id=UCMD&text=status";
+    const missingResponseTimestamp = String(Math.floor(Date.now() / 1000));
+    const noResponseUrl = await app.inject({
+      method: "POST",
+      url: "/api/slack/commands",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "x-slack-request-timestamp": missingResponseTimestamp,
+        "x-slack-signature": signSlack(missingResponseUrl, missingResponseTimestamp),
+      },
+      payload: missingResponseUrl,
+    });
+    assert.equal(noResponseUrl.statusCode, 400);
   }
 
   // --- Restricted approval: non-approver gets an ephemeral reply, member accepts ---

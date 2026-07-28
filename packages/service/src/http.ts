@@ -74,6 +74,7 @@ const COMMAND_USAGE = [
   "`/feature-rec approvers @usergroup|@user…|everyone` — restrict who can approve; no argument shows the current value",
   "`/feature-rec status` — show routing, mention, and approvers",
 ].join("\n");
+const COMMAND_FAILED = "Something went wrong. Please try again.";
 
 function describeMention(mention: string | null): string {
   if (mention === null) return "@here (default)";
@@ -594,28 +595,58 @@ export function buildServer(input: {
     const teamId = form.get("team_id") ?? "";
     const channelId = form.get("channel_id") ?? "";
     const userId = form.get("user_id") ?? "";
-    if (!teamId || !channelId || !userId) {
+    const responseUrl = form.get("response_url") ?? "";
+    if (!teamId || !channelId || !userId || !responseUrl) {
       return reply.code(400).send({ error: "malformed command payload" });
     }
 
-    const ephemeral = (text: string) => reply.send({ response_type: "ephemeral", text });
     const [subcommand, ...args] = (form.get("text") ?? "").trim().split(/\s+/).filter(Boolean);
-    try {
-      if (subcommand === "mention") {
-        return ephemeral(await mentionCommand({ teamId, channelId, userId, args }));
-      }
-      if (subcommand === "approvers") {
-        return ephemeral(await approversCommand({ teamId, channelId, userId, args }));
-      }
-      if (subcommand === "status") {
-        return ephemeral(await statusCommand(teamId, channelId));
-      }
-      return ephemeral(COMMAND_USAGE);
-    } catch (err) {
-      if (err instanceof CommandError) return ephemeral(err.message);
-      throw err;
-    }
+    // Slack requires the command ack within three seconds. All command work,
+    // including Slack API lookups and channel reconciliation, runs after this
+    // empty 200 and delivers its result through the signed response_url.
+    reply.send("");
+    void handleCommand({ teamId, channelId, userId, responseUrl, subcommand, args });
+    return reply;
   });
+
+  async function handleCommand(input: {
+    teamId: string;
+    channelId: string;
+    userId: string;
+    responseUrl: string;
+    subcommand: string | undefined;
+    args: string[];
+  }): Promise<void> {
+    let text: string;
+    try {
+      if (input.subcommand === "mention") {
+        text = await mentionCommand(input);
+      } else if (input.subcommand === "approvers") {
+        text = await approversCommand(input);
+      } else if (input.subcommand === "status") {
+        text = await statusCommand(input.teamId, input.channelId);
+      } else {
+        text = COMMAND_USAGE;
+      }
+    } catch (err) {
+      if (err instanceof CommandError) {
+        text = err.message;
+      } else {
+        app.log.error(
+          { err, teamId: input.teamId, channelId: input.channelId },
+          "Slack command failed",
+        );
+        text = COMMAND_FAILED;
+      }
+    }
+
+    await slack.respondEphemeral(input.responseUrl, text).catch((err: unknown) => {
+      app.log.warn(
+        { err, teamId: input.teamId, channelId: input.channelId },
+        "Slack command ephemeral reply failed",
+      );
+    });
+  }
 
   async function mentionCommand(input: {
     teamId: string;
