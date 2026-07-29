@@ -973,6 +973,7 @@ try {
         app,
         membershipEvent({ type: "member_joined_channel", teamId: "TEVT", user, channel, ts }),
       );
+    const eventTs = (offsetMs = 0) => ((Date.now() + offsetMs) / 1000).toFixed(6);
     const leave = (channel: string, ts: string) =>
       postSlackEvent(
         app,
@@ -985,18 +986,21 @@ try {
         }),
       );
 
-    await join("CE1", "1710000001.000000");
+    slack.channels = ["CE1"];
+    await join("CE1", eventTs());
     assert.ok(await waitFor(async () => slack.postMessageCalls.length === 1));
     assert.deepEqual(slack.postMessageCalls[0], { channel: "CE1", text: SLACK_GREETING_ACTIVE });
 
-    await join("CE2", "1710000002.000000");
+    slack.channels = ["CE1", "CE2"];
+    await join("CE2", eventTs());
     assert.ok(await waitFor(async () => slack.postMessageCalls.length === 2));
     assert.deepEqual(slack.postMessageCalls[1], {
       channel: "CE2",
       text: renderTemplate(SLACK_GREETING_NEXT_IN_LINE, { active_channel: "<#CE1>" }),
     });
 
-    await join("CE3", "1710000003.000000");
+    slack.channels = ["CE1", "CE2", "CE3"];
+    await join("CE3", eventTs());
     assert.ok(await waitFor(async () => slack.postMessageCalls.length === 3));
     assert.deepEqual(slack.postMessageCalls[2], {
       channel: "CE3",
@@ -1004,7 +1008,7 @@ try {
     });
 
     // Non-bot joins are dropped: no row, no greeting.
-    await join("CE4", "1710000004.000000", "UHUMAN");
+    await join("CE4", eventTs(), "UHUMAN");
     await sleep(150);
     assert.equal(slack.postMessageCalls.length, 3);
     assert.equal(
@@ -1013,16 +1017,17 @@ try {
     );
 
     // Leaving a non-active channel promotes nothing.
-    await leave("CE3", "1710000005.000000");
+    await leave("CE3", eventTs(1_000));
     await sleep(150);
     assert.equal(slack.postMessageCalls.length, 3);
 
     // Leaving the active channel notifies the promoted one.
-    await leave("CE1", "1710000006.000000");
+    await leave("CE1", eventTs(1_000));
     assert.ok(await waitFor(async () => slack.postMessageCalls.length === 4));
     assert.deepEqual(slack.postMessageCalls[3], { channel: "CE2", text: SLACK_PROMOTION_NOTICE });
 
     // A join without event_ts still records the channel (falls back to now).
+    slack.channels = ["CE2", "CE5"];
     await postSlackEvent(app, {
       type: "event_callback",
       team_id: "TEVT",
@@ -1043,10 +1048,11 @@ try {
         teamId: "TEVT",
         user: "UBOT",
         channel: "CE6",
-        ts: "1710000007.000000",
+        ts: eventTs(1_000),
       }),
       event_id: "Ev0RETRY01",
     };
+    slack.channels = ["CE2", "CE5", "CE6"];
     await postSlackEvent(app, retried);
     await postSlackEvent(app, retried);
     assert.ok(await waitFor(async () => ce6Greetings() === 1));
@@ -1074,13 +1080,48 @@ try {
         teamId: "TEVT",
         user: "UBOT",
         channel: activeHead.channelId,
-        ts: "1710000000.500000", // older than every recorded membership
+        ts: eventTs(-60_000), // older than every recorded membership
       }),
       event_id: "Ev0STALELEAVE",
     });
     await sleep(150);
     assert.equal(slack.postMessageCalls.length, messagesBefore);
     assert.equal((await store.activeBotChannels("TEVT"))[0]?.channelId, activeHead.channelId);
+  }
+
+  // --- Greeting reconciles stale membership before announcing the route ---
+  {
+    const slack = makeSlackStub({ teamId: "TGREET", channels: ["CNEW"] });
+    const app = makeApp(makeGithubStub(), slack);
+
+    // Simulate a missed/delayed leave event: Postgres still considers COLD
+    // active, but Slack's authoritative membership snapshot contains only the
+    // newly joined channel.
+    await store.recordChannelJoin({
+      teamId: "TGREET",
+      channelId: "COLD",
+      joinedAt: "2026-01-01T00:00:01.000Z",
+    });
+    await postSlackEvent(
+      app,
+      membershipEvent({
+        type: "member_joined_channel",
+        teamId: "TGREET",
+        user: "UBOT",
+        channel: "CNEW",
+        ts: "1767225602.000000",
+      }),
+    );
+
+    assert.ok(await waitFor(async () => slack.postMessageCalls.length === 1));
+    assert.deepEqual(slack.postMessageCalls[0], {
+      channel: "CNEW",
+      text: SLACK_GREETING_ACTIVE,
+    });
+    assert.deepEqual(
+      (await store.activeBotChannels("TGREET")).map((channel) => channel.channelId),
+      ["CNEW"],
+    );
   }
 
   // --- Commands: mention set/off/echo/bad-handle, approvers, status, usage ---
