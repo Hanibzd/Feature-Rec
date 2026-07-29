@@ -7,6 +7,7 @@ export class ChannelResolutionError extends Error {}
 export type TenantChannels = {
   teamId: string;
   channels: BotChannel[];
+  promotedChannelId: string | null;
 };
 
 // One membership sweep per call: poll Slack, reconcile bot_channels, and
@@ -19,13 +20,13 @@ export async function syncTenantChannels(
   const identity = await slack.botIdentity();
   const seenAt = new Date().toISOString();
   const channelIds = await slack.listBotChannels();
-  await store.syncBotChannels({
+  const promotedChannelId = await store.syncBotChannels({
     teamId: identity.teamId,
     channelIds,
     seenAt,
   });
   const channels = await store.activeBotChannels(identity.teamId);
-  return { teamId: identity.teamId, channels };
+  return { teamId: identity.teamId, channels, promotedChannelId };
 }
 
 // Resolved at post time, never from cached config: removing the bot from the
@@ -33,9 +34,9 @@ export async function syncTenantChannels(
 export async function resolveChannel(
   store: CycleStore,
   slack: SlackClient,
-): Promise<{ teamId: string; channelId: string }> {
-  const { teamId, channels } = await syncTenantChannels(store, slack);
+): Promise<{ teamId: string; channelId: string; promotedChannelId: string | null }> {
+  const { teamId, channels, promotedChannelId } = await syncTenantChannels(store, slack);
   const active = channels[0];
   if (!active) throw new ChannelResolutionError(SLACK_NO_CHANNEL_MESSAGE);
-  return { teamId, channelId: active.channelId };
+  return { teamId, channelId: active.channelId, promotedChannelId };
 }

@@ -1089,14 +1089,14 @@ try {
     assert.equal((await store.activeBotChannels("TEVT"))[0]?.channelId, activeHead.channelId);
   }
 
-  // --- Greeting reconciles stale membership before announcing the route ---
+  // --- Poll-driven failover announces promotion before a delayed leave event ---
   {
     const slack = makeSlackStub({ teamId: "TGREET", channels: ["CNEW"] });
     const app = makeApp(makeGithubStub(), slack);
 
-    // Simulate a missed/delayed leave event: Postgres still considers COLD
-    // active, but Slack's authoritative membership snapshot contains only the
-    // newly joined channel.
+    // The join greeting's membership poll can observe COLD's removal before
+    // Slack delivers member_left_channel. That poll owns the active-channel
+    // transition and must announce it; the later event must not duplicate it.
     await store.recordChannelJoin({
       teamId: "TGREET",
       channelId: "COLD",
@@ -1116,12 +1116,25 @@ try {
     assert.ok(await waitFor(async () => slack.postMessageCalls.length === 1));
     assert.deepEqual(slack.postMessageCalls[0], {
       channel: "CNEW",
-      text: SLACK_GREETING_ACTIVE,
+      text: SLACK_PROMOTION_NOTICE,
     });
     assert.deepEqual(
       (await store.activeBotChannels("TGREET")).map((channel) => channel.channelId),
       ["CNEW"],
     );
+
+    await postSlackEvent(app, {
+      ...membershipEvent({
+        type: "member_left_channel",
+        teamId: "TGREET",
+        user: "UBOT",
+        channel: "COLD",
+        ts: ((Date.now() + 1_000) / 1000).toFixed(6),
+      }),
+      event_id: "Ev0DELAYEDPROMOTION",
+    });
+    await sleep(150);
+    assert.equal(slack.postMessageCalls.length, 1);
   }
 
   // --- Commands: mention set/off/echo/bad-handle, approvers, status, usage ---
@@ -1673,22 +1686,26 @@ try {
     // leave (10:57) would apply. The monotonic observation (11:00) keeps the
     // delayed leave ignored and the channel active.
     assert.equal(
-      await store.recordChannelLeave({
-        teamId: "TMONO",
-        channelId: "CMONO",
-        leftAt: "2026-07-22T10:57:00.000Z",
-      }),
+      (
+        await store.recordChannelLeave({
+          teamId: "TMONO",
+          channelId: "CMONO",
+          leftAt: "2026-07-22T10:57:00.000Z",
+        })
+      ).applied,
       false,
     );
     assert.equal((await store.activeBotChannels("TMONO")).length, 1);
 
     // A leave newer than every observation still applies.
     assert.equal(
-      await store.recordChannelLeave({
-        teamId: "TMONO",
-        channelId: "CMONO",
-        leftAt: "2026-07-22T11:01:00.000Z",
-      }),
+      (
+        await store.recordChannelLeave({
+          teamId: "TMONO",
+          channelId: "CMONO",
+          leftAt: "2026-07-22T11:01:00.000Z",
+        })
+      ).applied,
       true,
     );
     assert.equal((await store.activeBotChannels("TMONO")).length, 0);

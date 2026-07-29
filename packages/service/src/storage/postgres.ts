@@ -242,8 +242,19 @@ export class PostgresCycleStore implements CycleStore {
     // When the membership snapshot was taken (before the Slack API call), so a
     // join event that lands mid-poll is not reaped by the poll's stale list.
     seenAt: string;
-  }): Promise<void> {
-    await this.#db.transaction().execute(async (trx) => {
+  }): Promise<string | null> {
+    return this.#db.transaction().execute(async (trx) => {
+      const lockKey = `bot-channels:${input.teamId}`;
+      await sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`.execute(trx);
+      const activeBefore = await trx
+        .selectFrom("bot_channels")
+        .select("channel_id")
+        .where("team_id", "=", input.teamId)
+        .where("left_at", "is", null)
+        .orderBy(sql`coalesce(joined_at, first_seen_at)`)
+        .orderBy("channel_id")
+        .executeTakeFirst();
+
       if (input.channelIds.length > 0) {
         await trx
           .insertInto("bot_channels")
@@ -292,6 +303,20 @@ export class PostgresCycleStore implements CycleStore {
         missing = missing.where("channel_id", "not in", input.channelIds);
       }
       await missing.execute();
+
+      const activeAfter = await trx
+        .selectFrom("bot_channels")
+        .select("channel_id")
+        .where("team_id", "=", input.teamId)
+        .where("left_at", "is", null)
+        .orderBy(sql`coalesce(joined_at, first_seen_at)`)
+        .orderBy("channel_id")
+        .executeTakeFirst();
+      return activeBefore &&
+        activeAfter &&
+        activeBefore.channel_id !== activeAfter.channel_id
+        ? activeAfter.channel_id
+        : null;
     });
   }
 
@@ -317,65 +342,101 @@ export class PostgresCycleStore implements CycleStore {
     channelId: string;
     joinedAt: string;
   }): Promise<void> {
-    await this.#db
-      .insertInto("bot_channels")
-      .values({
-        team_id: input.teamId,
-        channel_id: input.channelId,
-        joined_at: input.joinedAt,
-        first_seen_at: input.joinedAt,
-        last_seen_at: input.joinedAt,
-      })
-      .onConflict((oc) =>
-        oc.columns(["team_id", "channel_id"]).doUpdateSet({
-          // Monotonic: a delayed old join event must never move the latest
-          // membership observation backward.
-          last_seen_at: sql`greatest(bot_channels.last_seen_at, excluded.last_seen_at)`,
-          // Rejoin restarts ordering at the event time. For an active,
-          // poll-seeded row, fill the exact time only when the event belongs to
-          // the current membership generation; last_left_at remains available
-          // after a poll clears left_at. Established ordering never moves.
-          joined_at: sql`case
-            when bot_channels.left_at is null then
-              case
-                when bot_channels.joined_at is not null then bot_channels.joined_at
-                when bot_channels.last_left_at is null
-                  or bot_channels.last_left_at < excluded.joined_at
-                  then excluded.joined_at
-                else null
-              end
-            when bot_channels.left_at >= excluded.joined_at then bot_channels.joined_at
-            else excluded.joined_at end`,
-          first_seen_at: sql`case
-            when bot_channels.left_at is null then bot_channels.first_seen_at
-            when bot_channels.left_at >= excluded.joined_at then bot_channels.first_seen_at
-            else excluded.first_seen_at end`,
-          left_at: sql`case
-            when bot_channels.left_at is not null and bot_channels.left_at >= excluded.joined_at then bot_channels.left_at
-            else null end`,
-        }),
-      )
-      .execute();
+    await this.#db.transaction().execute(async (trx) => {
+      const lockKey = `bot-channels:${input.teamId}`;
+      await sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`.execute(trx);
+      await trx
+        .insertInto("bot_channels")
+        .values({
+          team_id: input.teamId,
+          channel_id: input.channelId,
+          joined_at: input.joinedAt,
+          first_seen_at: input.joinedAt,
+          last_seen_at: input.joinedAt,
+        })
+        .onConflict((oc) =>
+          oc.columns(["team_id", "channel_id"]).doUpdateSet({
+            // Monotonic: a delayed old join event must never move the latest
+            // membership observation backward.
+            last_seen_at: sql`greatest(bot_channels.last_seen_at, excluded.last_seen_at)`,
+            // Rejoin restarts ordering at the event time. For an active,
+            // poll-seeded row, fill the exact time only when the event belongs to
+            // the current membership generation; last_left_at remains available
+            // after a poll clears left_at. Established ordering never moves.
+            joined_at: sql`case
+              when bot_channels.left_at is null then
+                case
+                  when bot_channels.joined_at is not null then bot_channels.joined_at
+                  when bot_channels.last_left_at is null
+                    or bot_channels.last_left_at < excluded.joined_at
+                    then excluded.joined_at
+                  else null
+                end
+              when bot_channels.left_at >= excluded.joined_at then bot_channels.joined_at
+              else excluded.joined_at end`,
+            first_seen_at: sql`case
+              when bot_channels.left_at is null then bot_channels.first_seen_at
+              when bot_channels.left_at >= excluded.joined_at then bot_channels.first_seen_at
+              else excluded.first_seen_at end`,
+            left_at: sql`case
+              when bot_channels.left_at is not null and bot_channels.left_at >= excluded.joined_at then bot_channels.left_at
+              else null end`,
+          }),
+        )
+        .execute();
+    });
   }
 
   async recordChannelLeave(input: {
     teamId: string;
     channelId: string;
     leftAt: string;
-  }): Promise<boolean> {
-    const result = await this.#db
-      .updateTable("bot_channels")
-      .set({ left_at: input.leftAt, last_left_at: input.leftAt })
-      .where("team_id", "=", input.teamId)
-      .where("channel_id", "=", input.channelId)
-      .where("left_at", "is", null)
-      // A leave older than the latest observed membership is a delayed retry
-      // (Delayed Events redeliver for up to 24h) arriving after a rejoin or a
-      // newer poll: it must not deactivate the current membership. Skipping is
-      // safe — if the bot really is gone, the next poll reaps the row.
-      .where("last_seen_at", "<=", new Date(input.leftAt))
-      .executeTakeFirst();
-    return (result.numUpdatedRows ?? 0n) > 0n;
+  }): Promise<{ applied: boolean; promotedChannelId: string | null }> {
+    return this.#db.transaction().execute(async (trx) => {
+      const lockKey = `bot-channels:${input.teamId}`;
+      await sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`.execute(trx);
+      const activeBefore = await trx
+        .selectFrom("bot_channels")
+        .select("channel_id")
+        .where("team_id", "=", input.teamId)
+        .where("left_at", "is", null)
+        .orderBy(sql`coalesce(joined_at, first_seen_at)`)
+        .orderBy("channel_id")
+        .executeTakeFirst();
+      const result = await trx
+        .updateTable("bot_channels")
+        .set({ left_at: input.leftAt, last_left_at: input.leftAt })
+        .where("team_id", "=", input.teamId)
+        .where("channel_id", "=", input.channelId)
+        .where("left_at", "is", null)
+        // A leave older than the latest observed membership is a delayed retry
+        // (Delayed Events redeliver for up to 24h) arriving after a rejoin or a
+        // newer poll: it must not deactivate the current membership. Skipping is
+        // safe — if the bot really is gone, the next poll reaps the row.
+        .where("last_seen_at", "<=", new Date(input.leftAt))
+        .executeTakeFirst();
+      if (
+        (result.numUpdatedRows ?? 0n) === 0n ||
+        activeBefore?.channel_id !== input.channelId
+      ) {
+        return {
+          applied: (result.numUpdatedRows ?? 0n) > 0n,
+          promotedChannelId: null,
+        };
+      }
+      const promoted = await trx
+        .selectFrom("bot_channels")
+        .select("channel_id")
+        .where("team_id", "=", input.teamId)
+        .where("left_at", "is", null)
+        .orderBy(sql`coalesce(joined_at, first_seen_at)`)
+        .orderBy("channel_id")
+        .executeTakeFirst();
+      return {
+        applied: true,
+        promotedChannelId: promoted?.channel_id ?? null,
+      };
+    });
   }
 
   async getChannelSettings(teamId: string, channelId: string): Promise<ChannelSettings | null> {
