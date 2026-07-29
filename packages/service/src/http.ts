@@ -793,7 +793,12 @@ export function buildServer(input: {
   }
 
   async function greetJoinedChannel(teamId: string, channelId: string): Promise<void> {
-    const active = await store.activeBotChannels(teamId);
+    // Join/leave events can be delayed or missed. Reconcile the same live
+    // membership snapshot used by status and delivery before announcing the
+    // route, so a stale channel row cannot produce a contradictory greeting.
+    const tenant = await syncTenantChannels(store, slack);
+    if (tenant.teamId !== teamId) return;
+    const active = tenant.channels;
     const rank = active.findIndex((channel) => channel.channelId === channelId) + 1;
     if (rank === 0) return; // already left again; nothing to greet
     const text =
