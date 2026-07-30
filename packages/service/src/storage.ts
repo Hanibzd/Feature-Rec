@@ -56,11 +56,13 @@ export type CycleStore = {
   // Reconcile bot channel membership from a poll: upsert first/last seen,
   // mark missing rows left, and reset ordering on rejoin. seenAt is when the
   // snapshot was taken, so rows seen since then are never reaped by stale data.
+  // Returns the newly promoted channel when this snapshot removes the active
+  // channel. The caller owns the human-facing promotion notice.
   syncBotChannels(input: {
     teamId: string;
     channelIds: string[];
     seenAt: string;
-  }): Promise<void>;
+  }): Promise<string | null>;
   // Channels the bot is currently in, oldest introduction first.
   activeBotChannels(teamId: string): Promise<BotChannel[]>;
   recordChannelJoin(input: {
@@ -68,14 +70,13 @@ export type CycleStore = {
     channelId: string;
     joinedAt: string;
   }): Promise<void>;
-  // Resolves true when the leave was applied; false when it was ignored as
-  // stale (older than the latest observed membership), so callers must not
-  // act on it — e.g. no promotion notice for a leave that changed nothing.
+  // Reports whether the leave was applied and the newly promoted channel when
+  // it removed the active channel. Stale or duplicate leaves are not applied.
   recordChannelLeave(input: {
     teamId: string;
     channelId: string;
     leftAt: string;
-  }): Promise<boolean>;
+  }): Promise<{ applied: boolean; promotedChannelId: string | null }>;
   getChannelSettings(teamId: string, channelId: string): Promise<ChannelSettings | null>;
   setMention(input: {
     teamId: string;

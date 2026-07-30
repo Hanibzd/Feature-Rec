@@ -18,7 +18,7 @@ import { GitHubClient } from "./github";
 import { withRetry } from "./retry";
 import { SlackClient, verifySlackSignature } from "./slack";
 import type { SlackUsergroup } from "./slack";
-import type { BotChannel, CycleRecord, CycleStore } from "./storage";
+import type { CycleRecord, CycleStore } from "./storage";
 
 const VIDEO_BODY_LIMIT_BYTES = 500 * 1024 * 1024;
 
@@ -423,7 +423,11 @@ export function buildServer(input: {
       // check-run message and tell the runner explicitly (settled: true) that
       // there is nothing left to report. The status guard on /failed remains
       // as defense-in-depth against races, not as the preservation mechanism.
-      let resolved: { teamId: string; channelId: string };
+      let resolved: {
+        teamId: string;
+        channelId: string;
+        promotedChannelId: string | null;
+      };
       try {
         resolved = await resolveChannel(store, slack);
       } catch (err) {
@@ -450,6 +454,7 @@ export function buildServer(input: {
           .code(422)
           .send({ ok: false, error: "no_slack_channel", message: err.message, settled: true });
       }
+      if (resolved.promotedChannelId) announcePromotion(resolved.promotedChannelId);
 
       await withRetry(() =>
         github.updateCheckRun(cycle, {
@@ -560,22 +565,22 @@ export function buildServer(input: {
       return reply.send({ ok: true });
     }
 
-    const activeBefore = await store.activeBotChannels(teamId);
     // A stale leave (older than the latest observed membership, e.g. a
     // delayed first delivery after a rejoin) changes nothing, so it must not
     // announce a promotion the channel never went through.
-    const left = await store.recordChannelLeave({ teamId, channelId, leftAt: eventAt });
-    if (left && (await isFirstEventDelivery(body.event_id))) {
-      void notifyPromotion(teamId, channelId, activeBefore).catch((err) => app.log.error(err));
-    }
+    const leave = await store.recordChannelLeave({
+      teamId,
+      channelId,
+      leftAt: eventAt,
+    });
+    if (leave.promotedChannelId) announcePromotion(leave.promotedChannelId);
     return reply.send({ ok: true });
   });
 
-  // Membership writes are idempotent; greetings and promotion notices are
-  // not. Slack retries deliveries (including after a lost ack, when we DID
-  // already post), so the human-facing side effects dedupe on the globally
-  // unique event_id. Recorded after the membership write: a crash between the
-  // two replays the idempotent write on retry and still greets exactly once.
+  // Membership writes are idempotent; greetings are not. Slack retries
+  // deliveries (including after a lost ack, when we DID already post), so
+  // greetings dedupe on the globally unique event_id. Promotion notices
+  // dedupe on the atomic active-channel transition in the store.
   async function isFirstEventDelivery(eventId: string | undefined): Promise<boolean> {
     if (!eventId) return true;
     return store.recordProcessedInteraction(`slack-event:${eventId}`, "slack-event");
@@ -775,6 +780,7 @@ export function buildServer(input: {
 
   async function statusCommand(teamId: string, channelId: string): Promise<string> {
     const tenant = await syncTenantChannels(store, slack);
+    if (tenant.promotedChannelId) announcePromotion(tenant.promotedChannelId);
     const active = tenant.channels[0];
     if (!active) return SLACK_NO_CHANNEL_MESSAGE;
     const settings = await store.getChannelSettings(teamId, channelId);
@@ -798,6 +804,10 @@ export function buildServer(input: {
     // route, so a stale channel row cannot produce a contradictory greeting.
     const tenant = await syncTenantChannels(store, slack);
     if (tenant.teamId !== teamId) return;
+    if (tenant.promotedChannelId) {
+      announcePromotion(tenant.promotedChannelId);
+      if (tenant.promotedChannelId === channelId) return;
+    }
     const active = tenant.channels;
     const rank = active.findIndex((channel) => channel.channelId === channelId) + 1;
     if (rank === 0) return; // already left again; nothing to greet
@@ -810,14 +820,10 @@ export function buildServer(input: {
     await slack.postMessage(channelId, text);
   }
 
-  async function notifyPromotion(
-    teamId: string,
-    leftChannelId: string,
-    activeBefore: BotChannel[],
-  ): Promise<void> {
-    if (activeBefore[0]?.channelId !== leftChannelId) return;
-    const promoted = (await store.activeBotChannels(teamId))[0];
-    if (promoted) await slack.postMessage(promoted.channelId, SLACK_PROMOTION_NOTICE);
+  function announcePromotion(channelId: string): void {
+    void slack.postMessage(channelId, SLACK_PROMOTION_NOTICE).catch((err: unknown) => {
+      app.log.error({ err, channelId }, "Slack promotion notice failed");
+    });
   }
 
   // Approval authorization comes from the channel's settings at click time:
