@@ -6,10 +6,9 @@ import {
   isAllowedPullRequestEvent,
   renderTemplate,
   SLACK_GREETING_ACTIVE,
-  SLACK_GREETING_NEXT_IN_LINE,
-  SLACK_GREETING_QUEUED,
+  SLACK_MULTIPLE_CHANNELS_MESSAGE,
   SLACK_NO_CHANNEL_MESSAGE,
-  SLACK_PROMOTION_NOTICE,
+  slackSelectedChannelUnavailableMessage,
 } from "../src/index";
 
 assert.equal(
@@ -55,15 +54,8 @@ assert.equal(
 );
 
 assert.equal(SLACK_GREETING_ACTIVE.includes("{"), false);
-assert.equal(SLACK_PROMOTION_NOTICE.includes("{"), false);
 assert.equal(SLACK_NO_CHANNEL_MESSAGE.includes("{"), false);
-assert.equal(
-  renderTemplate(SLACK_GREETING_NEXT_IN_LINE, { active_channel: "<#C0123>" }),
-  "Connected, validations currently go to <#C0123>. Remove me from that channel if you want reviews to happen here instead.",
-);
-assert.equal(
-  renderTemplate(SLACK_GREETING_QUEUED, { active_channel: "<#C0123>" }),
-  "Connected but currently unused, validations go to <#C0123>. Remove me from other channels to use this one.",
-);
+assert.ok(SLACK_MULTIPLE_CHANNELS_MESSAGE.includes("/feature-rec channel"));
+assert.ok(slackSelectedChannelUnavailableMessage("C0123").includes("<#C0123>"));
 
 console.log("core selftest passed");

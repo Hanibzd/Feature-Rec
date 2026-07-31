@@ -3,17 +3,15 @@ import crypto from "node:crypto";
 import {
   buildCycleKey,
   ClassifierResultSchema,
-  renderTemplate,
   RunStartRequestSchema,
   SlackApprovalPayloadSchema,
   SLACK_GREETING_ACTIVE,
-  SLACK_GREETING_NEXT_IN_LINE,
-  SLACK_GREETING_QUEUED,
+  SLACK_MULTIPLE_CHANNELS_MESSAGE,
   SLACK_NO_CHANNEL_MESSAGE,
-  SLACK_PROMOTION_NOTICE,
+  slackSelectedChannelUnavailableMessage,
 } from "@feature-rec/core";
 import type { ServiceEnv } from "./env";
-import { ChannelResolutionError, resolveChannel, syncTenantChannels } from "./channels";
+import { ChannelResolutionError, resolveChannel } from "./channels";
 import { GitHubClient } from "./github";
 import { withRetry } from "./retry";
 import { SlackClient, verifySlackSignature } from "./slack";
@@ -59,10 +57,11 @@ function param(params: unknown, key: string): string {
 }
 
 // Slash-command target syntax. With "Escape channels, users, and links"
-// enabled on the command, user mentions arrive as <@U…|name>; usergroups and
-// @here/@channel arrive as typed.
+// enabled on the command, channel/user mentions arrive with stable IDs;
+// usergroups and @here/@channel arrive as typed.
 const USER_MENTION_RE = /^<@([UW][A-Z0-9]+)(?:\|[^>]*)?>$/;
 const SUBTEAM_MENTION_RE = /^<!subteam\^(S[A-Z0-9]+)(?:\|[^>]*)?>$/;
+const CHANNEL_MENTION_RE = /^<#([CG][A-Z0-9]+)(?:\|[^>]*)?>$/;
 
 // A user-correctable command mistake: the message goes back ephemerally
 // instead of becoming a 500.
@@ -70,6 +69,7 @@ class CommandError extends Error {}
 
 const COMMAND_USAGE = [
   "Usage:",
+  "`/feature-rec channel #channel-name` — select the channel that receives videos",
   "`/feature-rec mention @here|@channel|@usergroup|@user…|off` — who validation requests mention; no target shows the current value",
   "`/feature-rec approvers @usergroup|@user…|everyone` — restrict who can approve; no argument shows the current value",
   "`/feature-rec status` — show routing, mention, and approvers",
@@ -98,13 +98,6 @@ function rawJsonBody(body: unknown): string {
     if (typeof raw === "string") return raw;
   }
   return "";
-}
-
-function slackTsToIso(ts: string | undefined): string {
-  const seconds = Number(ts);
-  return Number.isFinite(seconds) && seconds > 0
-    ? new Date(seconds * 1000).toISOString()
-    : new Date().toISOString();
 }
 
 function timingSafeStringEqual(left: string, right: string): boolean {
@@ -245,12 +238,11 @@ export function buildServer(input: {
       }),
     );
 
-    // Advisory onboarding flag, DB-first: a tenant with known channels costs
-    // one SELECT (no Slack traffic on the per-PR hot path); only a tenant that
-    // looks never-onboarded pays a confirming Slack sweep. The runner uses it
-    // to fail frontend-visible PRs before rendering (seconds instead of a full
-    // render) while auto-accepted PRs stay unaffected. Advisory only:
-    // video-time resolution stays authoritative — channels can change mid-cycle.
+    // Advisory onboarding flag: use the same explicit-route/live-membership
+    // resolver as video delivery. The runner can then fail frontend-visible
+    // PRs before rendering while auto-accepted PRs stay unaffected. Advisory
+    // only: video-time resolution stays authoritative because routes and
+    // membership can change mid-cycle.
     //
     // Advisory means it must never fail the start: a Slack outage here would
     // otherwise strand the cycle as `analyzing` with no attemptId returned, and
@@ -337,12 +329,16 @@ export function buildServer(input: {
     };
   });
 
-  // The tenant has at least one active review channel. DB answer first; a
-  // full Slack sweep only to confirm an apparent never-onboarded state.
+  // Whether the explicit route is usable now. This may initialize the
+  // single-membership missed-event fallback, exactly like video delivery.
   async function tenantHasChannels(): Promise<boolean> {
-    const identity = await slack.botIdentity();
-    if ((await store.activeBotChannels(identity.teamId)).length > 0) return true;
-    return (await syncTenantChannels(store, slack)).channels.length > 0;
+    try {
+      await resolveChannel(store, slack);
+      return true;
+    } catch (err) {
+      if (err instanceof ChannelResolutionError) return false;
+      throw err;
+    }
   }
 
   app.post("/api/runs/:cycleId/accepted", async (request, reply) => {
@@ -426,7 +422,6 @@ export function buildServer(input: {
       let resolved: {
         teamId: string;
         channelId: string;
-        promotedChannelId: string | null;
       };
       try {
         resolved = await resolveChannel(store, slack);
@@ -454,8 +449,6 @@ export function buildServer(input: {
           .code(422)
           .send({ ok: false, error: "no_slack_channel", message: err.message, settled: true });
       }
-      if (resolved.promotedChannelId) announcePromotion(resolved.promotedChannelId);
-
       await withRetry(() =>
         github.updateCheckRun(cycle, {
           status: "in_progress",
@@ -536,51 +529,30 @@ export function buildServer(input: {
     if (body.type === "url_verification") return reply.send({ challenge: body.challenge ?? "" });
     if (body.type !== "event_callback") return reply.send({ ok: true });
 
-    // Drop everything that isn't a bot membership change, without logging it:
+    // Drop everything that isn't a bot join, without logging it:
     // membership events fire for every user entering a bot channel and their
     // payloads must never reach the logs.
     const event = body.event ?? {};
     const isJoin = event.type === "member_joined_channel";
-    const isLeave = event.type === "member_left_channel";
-    if ((!isJoin && !isLeave) || !event.user || !event.channel) return reply.send({ ok: true });
+    if (!isJoin || !event.user || !event.channel) return reply.send({ ok: true });
     const identity = await slack.botIdentity();
     if (event.user !== identity.userId) return reply.send({ ok: true });
 
     const teamId = body.team_id ?? identity.teamId;
+    if (teamId !== identity.teamId) return reply.send({ ok: true });
     const channelId = event.channel;
-    const eventAt = slackTsToIso(event.event_ts);
 
-    // The idempotent DB write lands before the 200, so a pre-ack crash rides
-    // Slack's retries; greetings and notices run detached so Slack API latency
-    // cannot consume the 3-second deadline.
-    if (isJoin) {
-      await store.recordChannelJoin({
-        teamId,
-        channelId,
-        joinedAt: eventAt,
-      });
-      if (await isFirstEventDelivery(body.event_id)) {
-        void greetJoinedChannel(teamId, channelId).catch((err) => app.log.error(err));
-      }
-      return reply.send({ ok: true });
+    // The first observed join wins under the per-team route lock. Later joins
+    // are deliberately silent and do not persist membership state.
+    const initialized = await store.initializeTeamChannelRoute({ teamId, channelId });
+    if (initialized.initializedRoute && (await isFirstEventDelivery(body.event_id))) {
+      void greetJoinedChannel(teamId, channelId).catch((err) => app.log.error(err));
     }
-
-    // A stale leave (older than the latest observed membership, e.g. a
-    // delayed first delivery after a rejoin) changes nothing, so it must not
-    // announce a promotion the channel never went through.
-    const leave = await store.recordChannelLeave({
-      teamId,
-      channelId,
-      leftAt: eventAt,
-    });
-    if (leave.promotedChannelId) announcePromotion(leave.promotedChannelId);
     return reply.send({ ok: true });
   });
 
-  // Membership writes are idempotent; greetings are not. Slack retries
-  // deliveries (including after a lost ack, when we DID already post), so
-  // greetings dedupe on the globally unique event_id. Promotion notices
-  // dedupe on the atomic active-channel transition in the store.
+  // Route initialization is idempotent; the first greeting is not. Slack
+  // retries therefore dedupe that side effect on the globally unique event ID.
   async function isFirstEventDelivery(eventId: string | undefined): Promise<boolean> {
     if (!eventId) return true;
     return store.recordProcessedInteraction(`slack-event:${eventId}`, "slack-event");
@@ -624,12 +596,22 @@ export function buildServer(input: {
   }): Promise<void> {
     let text: string;
     try {
-      if (input.subcommand === "mention") {
-        text = await mentionCommand(input);
+      const [identity, botChannelIds] = await Promise.all([
+        slack.botIdentity(),
+        slack.listBotChannels(),
+      ]);
+      if (identity.teamId !== input.teamId) {
+        throw new CommandError("This command belongs to a different Slack workspace.");
+      }
+      const context = { ...input, botChannelIds };
+      if (input.subcommand === "channel") {
+        text = await channelCommand(context);
+      } else if (input.subcommand === "mention") {
+        text = await mentionCommand(context);
       } else if (input.subcommand === "approvers") {
-        text = await approversCommand(input);
+        text = await approversCommand(context);
       } else if (input.subcommand === "status") {
-        text = await statusCommand(input.teamId, input.channelId);
+        text = await statusCommand(context);
       } else {
         text = COMMAND_USAGE;
       }
@@ -653,177 +635,223 @@ export function buildServer(input: {
     });
   }
 
-  async function mentionCommand(input: {
+  type CommandContext = {
     teamId: string;
     channelId: string;
     userId: string;
     args: string[];
-  }): Promise<string> {
+    botChannelIds: string[];
+  };
+
+  async function channelCommand(input: CommandContext): Promise<string> {
+    if (input.args.length !== 1) {
+      throw new CommandError("Usage: `/feature-rec channel #channel-name`.");
+    }
+    const target = CHANNEL_MENTION_RE.exec(input.args[0]);
+    if (!target) throw new CommandError("Usage: `/feature-rec channel #channel-name`.");
+    const channelId = target[1];
+    if (!input.botChannelIds.includes(channelId)) {
+      throw new CommandError(`Invite @Feature-Rec to <#${channelId}>, then try again.`);
+    }
+    await store.selectTeamChannel({ teamId: input.teamId, channelId });
+    return `Feature-Rec videos will now be sent to <#${channelId}>. Existing mention and approver settings for that channel are unchanged.`;
+  }
+
+  async function selectedCommandChannel(input: CommandContext): Promise<string> {
+    const route = await store.getTeamChannelRoute(input.teamId);
+    if (!route) {
+      if (input.botChannelIds.length === 0) throw new CommandError(SLACK_NO_CHANNEL_MESSAGE);
+      if (input.botChannelIds.length > 1) {
+        throw new CommandError(SLACK_MULTIPLE_CHANNELS_MESSAGE);
+      }
+      throw new CommandError(
+        "No Feature-Rec review channel is selected. Run `/feature-rec channel #channel-name` to select one.",
+      );
+    }
+    if (!input.botChannelIds.includes(route.selectedChannelId)) {
+      throw new CommandError(slackSelectedChannelUnavailableMessage(route.selectedChannelId));
+    }
+    return route.selectedChannelId;
+  }
+
+  function assertGuardedSettingWrite(written: boolean): void {
+    if (!written) {
+      throw new CommandError(
+        "The selected Feature-Rec channel changed while the command was running. Please try again.",
+      );
+    }
+  }
+
+  async function mentionCommand(input: CommandContext): Promise<string> {
+    const channelId = await selectedCommandChannel(input);
     if (input.args.length === 0) {
-      const settings = await store.getChannelSettings(input.teamId, input.channelId);
-      return `Mention: ${describeMention(settings?.mention ?? null)}`;
+      const settings = await store.getChannelSettings(input.teamId, channelId);
+      return `Mention for <#${channelId}>: ${describeMention(settings?.mention ?? null)}`;
     }
     if (input.args.includes("off")) {
       if (input.args.length > 1) {
         throw new CommandError('Use "off" by itself: `/feature-rec mention off`.');
       }
-      await store.setMention({
+      const written = await store.setSelectedChannelMention({
         teamId: input.teamId,
-        channelId: input.channelId,
+        expectedChannelId: channelId,
         mention: "",
         updatedBy: input.userId,
       });
-      return "Mention turned off for validation requests in this channel.";
+      assertGuardedSettingWrite(written);
+      return `Mention turned off for validation requests in <#${channelId}>.`;
     }
-    const mention = (await resolveMentionTargets(input.args)).join(" ");
-    await store.setMention({
+    const targets = await resolveTargets(input.args, "mention");
+    await validateTargetMembership(channelId, targets.concreteUserIds, "mentions");
+    const mention = targets.rendered.join(" ");
+    const written = await store.setSelectedChannelMention({
       teamId: input.teamId,
-      channelId: input.channelId,
+      expectedChannelId: channelId,
       mention,
       updatedBy: input.userId,
     });
-    return `Validation requests in this channel will mention ${mention}.`;
+    assertGuardedSettingWrite(written);
+    return `Validation requests in <#${channelId}> will mention ${mention}.`;
   }
 
-  async function resolveMentionTargets(tokens: string[]): Promise<string[]> {
-    const rendered: string[] = [];
-    let usergroups: SlackUsergroup[] | null = null;
-    for (const token of tokens) {
-      if (token === "@here" || token === "<!here>") {
-        rendered.push("<!here>");
-        continue;
-      }
-      if (token === "@channel" || token === "<!channel>") {
-        rendered.push("<!channel>");
-        continue;
-      }
-      const user = USER_MENTION_RE.exec(token);
-      if (user) {
-        rendered.push(`<@${user[1]}>`);
-        continue;
-      }
-      if (SUBTEAM_MENTION_RE.test(token)) {
-        rendered.push(token);
-        continue;
-      }
-      usergroups ??= await slack.listUsergroups();
-      const handle = token.replace(/^@/, "");
-      const group = usergroups.find((candidate) => candidate.handle === handle);
-      if (!group) {
-        throw new CommandError(
-          `Unknown mention target ${token}. Use @here, @channel, a usergroup handle, user mentions, or "off".`,
-        );
-      }
-      rendered.push(`<!subteam^${group.id}|@${group.handle}>`);
-    }
-    return rendered;
-  }
-
-  async function approversCommand(input: {
-    teamId: string;
-    channelId: string;
-    userId: string;
-    args: string[];
-  }): Promise<string> {
+  async function approversCommand(input: CommandContext): Promise<string> {
+    const channelId = await selectedCommandChannel(input);
     if (input.args.length === 0) {
-      const settings = await store.getChannelSettings(input.teamId, input.channelId);
-      return describeApprovers(settings?.approvers ?? null);
+      const settings = await store.getChannelSettings(input.teamId, channelId);
+      return `For <#${channelId}>: ${describeApprovers(settings?.approvers ?? null)}`;
     }
     if (input.args.includes("everyone") || input.args.includes("off")) {
       if (input.args.length > 1) {
         throw new CommandError('Use "everyone" by itself: `/feature-rec approvers everyone`.');
       }
-      await store.setApprovers({
+      const written = await store.setSelectedChannelApprovers({
         teamId: input.teamId,
-        channelId: input.channelId,
+        expectedChannelId: channelId,
         approvers: null,
         updatedBy: input.userId,
       });
-      return "Everyone in the channel can now approve.";
+      assertGuardedSettingWrite(written);
+      return `Everyone in <#${channelId}> can now approve.`;
     }
-    const ids = await resolveApproverTargets(input.args);
-    await store.setApprovers({
+    const targets = await resolveTargets(input.args, "approver");
+    await validateTargetMembership(channelId, targets.concreteUserIds, "approvers");
+    const written = await store.setSelectedChannelApprovers({
       teamId: input.teamId,
-      channelId: input.channelId,
-      approvers: ids,
+      expectedChannelId: channelId,
+      approvers: targets.storedIds,
       updatedBy: input.userId,
     });
-    return `Only ${renderApproverIds(ids)} can approve.`;
+    assertGuardedSettingWrite(written);
+    return `Only ${renderApproverIds(targets.storedIds)} can approve in <#${channelId}>.`;
   }
 
-  async function resolveApproverTargets(tokens: string[]): Promise<string[]> {
-    const ids = new Set<string>();
+  async function resolveTargets(
+    tokens: string[],
+    kind: "mention" | "approver",
+  ): Promise<{ rendered: string[]; storedIds: string[]; concreteUserIds: string[] }> {
+    const rendered = new Set<string>();
+    const storedIds = new Set<string>();
+    const concreteUserIds = new Set<string>();
     let usergroups: SlackUsergroup[] | null = null;
+    const memberCache = new Map<string, string[]>();
     for (const token of tokens) {
+      if (kind === "mention" && (token === "@here" || token === "<!here>")) {
+        rendered.add("<!here>");
+        continue;
+      }
+      if (kind === "mention" && (token === "@channel" || token === "<!channel>")) {
+        rendered.add("<!channel>");
+        continue;
+      }
       const user = USER_MENTION_RE.exec(token);
       if (user) {
-        ids.add(user[1]);
+        rendered.add(`<@${user[1]}>`);
+        storedIds.add(user[1]);
+        concreteUserIds.add(user[1]);
         continue;
       }
       const subteam = SUBTEAM_MENTION_RE.exec(token);
-      if (subteam) {
-        ids.add(subteam[1]);
-        continue;
-      }
       usergroups ??= await slack.listUsergroups();
       const handle = token.replace(/^@/, "");
-      const group = usergroups.find((candidate) => candidate.handle === handle);
+      const group = subteam
+        ? usergroups.find((candidate) => candidate.id === subteam[1])
+        : usergroups.find((candidate) => candidate.handle === handle);
       if (!group) {
+        const help =
+          kind === "mention"
+            ? 'Use @here, @channel, a usergroup handle, user mentions, or "off".'
+            : 'Use usergroup handles, user mentions, or "everyone".';
         throw new CommandError(
-          `Unknown approver ${token}. Use usergroup handles, user mentions, or "everyone".`,
+          `Unknown ${kind === "mention" ? "mention target" : "approver"} ${token}. ${help}`,
         );
       }
-      ids.add(group.id);
+      if (group.disabled) {
+        throw new CommandError(`Usergroup @${group.handle} is disabled and cannot be selected.`);
+      }
+      let members = memberCache.get(group.id);
+      if (!members) {
+        members = await slack.listUsergroupMembers(group.id);
+        memberCache.set(group.id, members);
+      }
+      if (members.length === 0) {
+        throw new CommandError(`Usergroup @${group.handle} has no users and cannot be selected.`);
+      }
+      rendered.add(`<!subteam^${group.id}|@${group.handle}>`);
+      storedIds.add(group.id);
+      members.forEach((member) => concreteUserIds.add(member));
     }
-    return [...ids];
+    return {
+      rendered: [...rendered],
+      storedIds: [...storedIds],
+      concreteUserIds: [...concreteUserIds],
+    };
   }
 
-  async function statusCommand(teamId: string, channelId: string): Promise<string> {
-    const tenant = await syncTenantChannels(store, slack);
-    if (tenant.promotedChannelId) announcePromotion(tenant.promotedChannelId);
-    const active = tenant.channels[0];
-    if (!active) return SLACK_NO_CHANNEL_MESSAGE;
-    const settings = await store.getChannelSettings(teamId, channelId);
+  async function validateTargetMembership(
+    channelId: string,
+    userIds: string[],
+    setting: "mentions" | "approvers",
+  ): Promise<void> {
+    if (userIds.length === 0) return;
+    const channelMembers = new Set(await slack.listChannelMembers(channelId));
+    const missing = userIds.filter((userId) => !channelMembers.has(userId));
+    if (missing.length === 0) return;
+    const visible = missing.slice(0, 5).map((userId) => `<@${userId}>`).join(", ");
+    const remainder = missing.length > 5 ? ` and ${missing.length - 5} more` : "";
+    const verb = missing.length === 1 ? "is not a member" : "are not members";
+    throw new CommandError(
+      `Cannot update ${setting} for <#${channelId}>: ${visible}${remainder} ${verb} of that channel.`,
+    );
+  }
+
+  async function statusCommand(input: CommandContext): Promise<string> {
+    const route = await store.getTeamChannelRoute(input.teamId);
+    if (!route) {
+      if (input.botChannelIds.length > 1) return SLACK_MULTIPLE_CHANNELS_MESSAGE;
+      return SLACK_NO_CHANNEL_MESSAGE;
+    }
+    const settings = await store.getChannelSettings(input.teamId, route.selectedChannelId);
+    const present = input.botChannelIds.includes(route.selectedChannelId);
     const lines = [
-      `Validations go to <#${active.channelId}>.`,
+      `Selected review channel: <#${route.selectedChannelId}> (${present ? "available" : "unavailable"}).`,
       `Mention: ${describeMention(settings?.mention ?? null)}`,
       describeApprovers(settings?.approvers ?? null),
     ];
-    const next = tenant.channels[1];
-    if (next) {
-      lines.push(
-        `If I'm removed from <#${active.channelId}>, validations will move to <#${next.channelId}>.`,
-      );
+    if (!present) {
+      lines.push(slackSelectedChannelUnavailableMessage(route.selectedChannelId));
     }
     return lines.join("\n");
   }
 
   async function greetJoinedChannel(teamId: string, channelId: string): Promise<void> {
-    // Join/leave events can be delayed or missed. Reconcile the same live
-    // membership snapshot used by status and delivery before announcing the
-    // route, so a stale channel row cannot produce a contradictory greeting.
-    const tenant = await syncTenantChannels(store, slack);
-    if (tenant.teamId !== teamId) return;
-    if (tenant.promotedChannelId) {
-      announcePromotion(tenant.promotedChannelId);
-      if (tenant.promotedChannelId === channelId) return;
-    }
-    const active = tenant.channels;
-    const rank = active.findIndex((channel) => channel.channelId === channelId) + 1;
-    if (rank === 0) return; // already left again; nothing to greet
-    const text =
-      rank === 1
-        ? SLACK_GREETING_ACTIVE
-        : renderTemplate(rank === 2 ? SLACK_GREETING_NEXT_IN_LINE : SLACK_GREETING_QUEUED, {
-            active_channel: `<#${active[0].channelId}>`,
-          });
-    await slack.postMessage(channelId, text);
-  }
-
-  function announcePromotion(channelId: string): void {
-    void slack.postMessage(channelId, SLACK_PROMOTION_NOTICE).catch((err: unknown) => {
-      app.log.error({ err, channelId }, "Slack promotion notice failed");
-    });
+    const identity = await slack.botIdentity();
+    if (identity.teamId !== teamId) return;
+    const [route, memberships] = await Promise.all([
+      store.getTeamChannelRoute(teamId),
+      slack.listBotChannels(),
+    ]);
+    if (route?.selectedChannelId !== channelId || !memberships.includes(channelId)) return;
+    await slack.postMessage(channelId, SLACK_GREETING_ACTIVE);
   }
 
   // Approval authorization comes from the channel's settings at click time:

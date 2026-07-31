@@ -91,14 +91,14 @@ export const GITHUB_REJECT_COMMENT = "@{pr_author} make the following changes:\n
 
 export const SLACK_GREETING_ACTIVE =
   "Connected, validation requests will appear in this channel.";
-export const SLACK_GREETING_NEXT_IN_LINE =
-  "Connected, validations currently go to {active_channel}. Remove me from that channel if you want reviews to happen here instead.";
-export const SLACK_GREETING_QUEUED =
-  "Connected but currently unused, validations go to {active_channel}. Remove me from other channels to use this one.";
-export const SLACK_PROMOTION_NOTICE =
-  "This channel now receives Feature-Rec validation requests.";
 export const SLACK_NO_CHANNEL_MESSAGE =
   "Invite @Feature-Rec to your Slack review channel, then re-run.";
+export const SLACK_MULTIPLE_CHANNELS_MESSAGE =
+  "Feature-Rec is present in multiple channels. Run `/feature-rec channel #channel-name` to choose where videos should be sent.";
+
+export function slackSelectedChannelUnavailableMessage(channelId: string): string {
+  return `The selected Feature-Rec channel <#${channelId}> is unavailable. Invite @Feature-Rec back or run \`/feature-rec channel #another-channel\` from any workspace conversation, then re-run.`;
+}
 
 export function renderTemplate(template: string, values: Record<string, string>): string {
   return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key: string) => values[key] ?? "");

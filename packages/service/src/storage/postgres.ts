@@ -1,17 +1,11 @@
 import crypto from "node:crypto";
 import { Kysely, PostgresDialect, sql } from "kysely";
-import type { Selectable } from "kysely";
+import type { Selectable, Transaction } from "kysely";
 import { Migrator } from "kysely/migration";
 import { Pool } from "pg";
 import { z } from "zod";
 import type { ReviewCycleStatus, RunStartRequest } from "@feature-rec/core";
-import type {
-  BotChannel,
-  ChannelSettings,
-  CycleRecord,
-  CycleStore,
-  StartCycleResult,
-} from "../storage";
+import type { ChannelSettings, CycleRecord, CycleStore, StartCycleResult } from "../storage";
 import type { DB, ReviewCyclesTable } from "./schema";
 import { migrationProvider } from "./migrations";
 
@@ -236,206 +230,52 @@ export class PostgresCycleStore implements CycleStore {
     return (result.numInsertedOrUpdatedRows ?? 0n) > 0n;
   }
 
-  async syncBotChannels(input: {
-    teamId: string;
-    channelIds: string[];
-    // When the membership snapshot was taken (before the Slack API call), so a
-    // join event that lands mid-poll is not reaped by the poll's stale list.
-    seenAt: string;
-  }): Promise<string | null> {
-    return this.#db.transaction().execute(async (trx) => {
-      const lockKey = `bot-channels:${input.teamId}`;
-      await sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`.execute(trx);
-      const activeBefore = await trx
-        .selectFrom("bot_channels")
-        .select("channel_id")
-        .where("team_id", "=", input.teamId)
-        .where("left_at", "is", null)
-        .orderBy(sql`coalesce(joined_at, first_seen_at)`)
-        .orderBy("channel_id")
-        .executeTakeFirst();
-
-      if (input.channelIds.length > 0) {
-        await trx
-          .insertInto("bot_channels")
-          .values(
-            input.channelIds.map((channelId) => ({
-              team_id: input.teamId,
-              channel_id: channelId,
-              first_seen_at: input.seenAt,
-              last_seen_at: input.seenAt,
-            })),
-          )
-          .onConflict((oc) =>
-            oc.columns(["team_id", "channel_id"]).doUpdateSet({
-              // Monotonic: an older concurrent poll must never move the
-              // latest membership observation backward (the leave guard
-              // compares against it).
-              last_seen_at: sql`greatest(bot_channels.last_seen_at, excluded.last_seen_at)`,
-              // Rejoin after a leave is a new introduction: reset ordering so
-              // the channel cannot steal the active slot. A leave recorded at
-              // or after the poll snapshot (excluded.last_seen_at = seenAt) is
-              // NEWER than this poll's stale membership list and must survive
-              // it — routing must never resurrect a channel the bot just left.
-              joined_at: sql`case
-                when bot_channels.left_at is null then bot_channels.joined_at
-                when bot_channels.left_at >= excluded.last_seen_at then bot_channels.joined_at
-                else null end`,
-              first_seen_at: sql`case
-                when bot_channels.left_at is null then bot_channels.first_seen_at
-                when bot_channels.left_at >= excluded.last_seen_at then bot_channels.first_seen_at
-                else excluded.first_seen_at end`,
-              left_at: sql`case
-                when bot_channels.left_at is not null and bot_channels.left_at >= excluded.last_seen_at then bot_channels.left_at
-                else null end`,
-            }),
-          )
-          .execute();
-      }
-
-      let missing = trx
-        .updateTable("bot_channels")
-        .set({ left_at: input.seenAt, last_left_at: input.seenAt })
-        .where("team_id", "=", input.teamId)
-        .where("left_at", "is", null)
-        .where("last_seen_at", "<", new Date(input.seenAt));
-      if (input.channelIds.length > 0) {
-        missing = missing.where("channel_id", "not in", input.channelIds);
-      }
-      await missing.execute();
-
-      const activeAfter = await trx
-        .selectFrom("bot_channels")
-        .select("channel_id")
-        .where("team_id", "=", input.teamId)
-        .where("left_at", "is", null)
-        .orderBy(sql`coalesce(joined_at, first_seen_at)`)
-        .orderBy("channel_id")
-        .executeTakeFirst();
-      return activeBefore &&
-        activeAfter &&
-        activeBefore.channel_id !== activeAfter.channel_id
-        ? activeAfter.channel_id
-        : null;
-    });
-  }
-
-  async activeBotChannels(teamId: string): Promise<BotChannel[]> {
-    const rows = await this.#db
-      .selectFrom("bot_channels")
+  async getTeamChannelRoute(
+    teamId: string,
+  ): Promise<{ teamId: string; selectedChannelId: string } | null> {
+    const row = await this.#db
+      .selectFrom("team_channel_routes")
       .selectAll()
       .where("team_id", "=", teamId)
-      .where("left_at", "is", null)
-      .orderBy(sql`coalesce(joined_at, first_seen_at)`)
-      .orderBy("channel_id")
-      .execute();
-    return rows.map((row) => ({
-      teamId: row.team_id,
-      channelId: row.channel_id,
-      joinedAt: row.joined_at === null ? null : row.joined_at.toISOString(),
-      firstSeenAt: row.first_seen_at.toISOString(),
-    }));
+      .executeTakeFirst();
+    return row
+      ? { teamId: row.team_id, selectedChannelId: row.selected_channel_id }
+      : null;
   }
 
-  async recordChannelJoin(input: {
+  async initializeTeamChannelRoute(input: {
     teamId: string;
     channelId: string;
-    joinedAt: string;
-  }): Promise<void> {
-    await this.#db.transaction().execute(async (trx) => {
-      const lockKey = `bot-channels:${input.teamId}`;
+  }): Promise<{ initializedRoute: boolean }> {
+    return this.#db.transaction().execute(async (trx) => {
+      const lockKey = `team-route:${input.teamId}`;
       await sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`.execute(trx);
-      await trx
-        .insertInto("bot_channels")
-        .values({
-          team_id: input.teamId,
-          channel_id: input.channelId,
-          joined_at: input.joinedAt,
-          first_seen_at: input.joinedAt,
-          last_seen_at: input.joinedAt,
-        })
-        .onConflict((oc) =>
-          oc.columns(["team_id", "channel_id"]).doUpdateSet({
-            // Monotonic: a delayed old join event must never move the latest
-            // membership observation backward.
-            last_seen_at: sql`greatest(bot_channels.last_seen_at, excluded.last_seen_at)`,
-            // Rejoin restarts ordering at the event time. For an active,
-            // poll-seeded row, fill the exact time only when the event belongs to
-            // the current membership generation; last_left_at remains available
-            // after a poll clears left_at. Established ordering never moves.
-            joined_at: sql`case
-              when bot_channels.left_at is null then
-                case
-                  when bot_channels.joined_at is not null then bot_channels.joined_at
-                  when bot_channels.last_left_at is null
-                    or bot_channels.last_left_at < excluded.joined_at
-                    then excluded.joined_at
-                  else null
-                end
-              when bot_channels.left_at >= excluded.joined_at then bot_channels.joined_at
-              else excluded.joined_at end`,
-            first_seen_at: sql`case
-              when bot_channels.left_at is null then bot_channels.first_seen_at
-              when bot_channels.left_at >= excluded.joined_at then bot_channels.first_seen_at
-              else excluded.first_seen_at end`,
-            left_at: sql`case
-              when bot_channels.left_at is not null and bot_channels.left_at >= excluded.joined_at then bot_channels.left_at
-              else null end`,
-          }),
-        )
-        .execute();
+      const result = await trx
+        .insertInto("team_channel_routes")
+        .values({ team_id: input.teamId, selected_channel_id: input.channelId })
+        .onConflict((oc) => oc.column("team_id").doNothing())
+        .executeTakeFirst();
+      return { initializedRoute: (result.numInsertedOrUpdatedRows ?? 0n) > 0n };
     });
   }
 
-  async recordChannelLeave(input: {
+  async selectTeamChannel(input: {
     teamId: string;
     channelId: string;
-    leftAt: string;
-  }): Promise<{ applied: boolean; promotedChannelId: string | null }> {
-    return this.#db.transaction().execute(async (trx) => {
-      const lockKey = `bot-channels:${input.teamId}`;
+  }): Promise<void> {
+    await this.#db.transaction().execute(async (trx) => {
+      const lockKey = `team-route:${input.teamId}`;
       await sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`.execute(trx);
-      const activeBefore = await trx
-        .selectFrom("bot_channels")
-        .select("channel_id")
-        .where("team_id", "=", input.teamId)
-        .where("left_at", "is", null)
-        .orderBy(sql`coalesce(joined_at, first_seen_at)`)
-        .orderBy("channel_id")
-        .executeTakeFirst();
-      const result = await trx
-        .updateTable("bot_channels")
-        .set({ left_at: input.leftAt, last_left_at: input.leftAt })
-        .where("team_id", "=", input.teamId)
-        .where("channel_id", "=", input.channelId)
-        .where("left_at", "is", null)
-        // A leave older than the latest observed membership is a delayed retry
-        // (Delayed Events redeliver for up to 24h) arriving after a rejoin or a
-        // newer poll: it must not deactivate the current membership. Skipping is
-        // safe — if the bot really is gone, the next poll reaps the row.
-        .where("last_seen_at", "<=", new Date(input.leftAt))
-        .executeTakeFirst();
-      if (
-        (result.numUpdatedRows ?? 0n) === 0n ||
-        activeBefore?.channel_id !== input.channelId
-      ) {
-        return {
-          applied: (result.numUpdatedRows ?? 0n) > 0n,
-          promotedChannelId: null,
-        };
-      }
-      const promoted = await trx
-        .selectFrom("bot_channels")
-        .select("channel_id")
-        .where("team_id", "=", input.teamId)
-        .where("left_at", "is", null)
-        .orderBy(sql`coalesce(joined_at, first_seen_at)`)
-        .orderBy("channel_id")
-        .executeTakeFirst();
-      return {
-        applied: true,
-        promotedChannelId: promoted?.channel_id ?? null,
-      };
+      await trx
+        .insertInto("team_channel_routes")
+        .values({
+          team_id: input.teamId,
+          selected_channel_id: input.channelId,
+        })
+        .onConflict((oc) =>
+          oc.column("team_id").doUpdateSet({ selected_channel_id: input.channelId }),
+        )
+        .execute();
     });
   }
 
@@ -460,14 +300,17 @@ export class PostgresCycleStore implements CycleStore {
     return { mention: row.mention, approvers };
   }
 
-  async #upsertChannelSettings(input: {
-    teamId: string;
-    channelId: string;
-    updatedBy: string;
-    set: { mention?: string; approvers?: string | null };
-  }): Promise<void> {
+  async #upsertChannelSettings(
+    input: {
+      teamId: string;
+      channelId: string;
+      updatedBy: string;
+      set: { mention?: string; approvers?: string | null };
+    },
+    db: Kysely<DB> | Transaction<DB> = this.#db,
+  ): Promise<void> {
     const t = now();
-    await this.#db
+    await db
       .insertInto("channel_settings")
       .values({
         team_id: input.teamId,
@@ -502,6 +345,20 @@ export class PostgresCycleStore implements CycleStore {
     });
   }
 
+  async setSelectedChannelMention(input: {
+    teamId: string;
+    expectedChannelId: string;
+    mention: string;
+    updatedBy: string;
+  }): Promise<boolean> {
+    return this.#updateSelectedChannelSettings({
+      teamId: input.teamId,
+      expectedChannelId: input.expectedChannelId,
+      updatedBy: input.updatedBy,
+      set: { mention: input.mention },
+    });
+  }
+
   async setApprovers(input: {
     teamId: string;
     channelId: string;
@@ -515,6 +372,49 @@ export class PostgresCycleStore implements CycleStore {
       channelId: input.channelId,
       updatedBy: input.updatedBy,
       set: { approvers },
+    });
+  }
+
+  async setSelectedChannelApprovers(input: {
+    teamId: string;
+    expectedChannelId: string;
+    approvers: string[] | null;
+    updatedBy: string;
+  }): Promise<boolean> {
+    const approvers = input.approvers?.length ? JSON.stringify(input.approvers) : null;
+    return this.#updateSelectedChannelSettings({
+      teamId: input.teamId,
+      expectedChannelId: input.expectedChannelId,
+      updatedBy: input.updatedBy,
+      set: { approvers },
+    });
+  }
+
+  async #updateSelectedChannelSettings(input: {
+    teamId: string;
+    expectedChannelId: string;
+    updatedBy: string;
+    set: { mention?: string; approvers?: string | null };
+  }): Promise<boolean> {
+    return this.#db.transaction().execute(async (trx) => {
+      const lockKey = `team-route:${input.teamId}`;
+      await sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`.execute(trx);
+      const route = await trx
+        .selectFrom("team_channel_routes")
+        .select("selected_channel_id")
+        .where("team_id", "=", input.teamId)
+        .executeTakeFirst();
+      if (route?.selected_channel_id !== input.expectedChannelId) return false;
+      await this.#upsertChannelSettings(
+        {
+          teamId: input.teamId,
+          channelId: input.expectedChannelId,
+          updatedBy: input.updatedBy,
+          set: input.set,
+        },
+        trx,
+      );
+      return true;
     });
   }
 

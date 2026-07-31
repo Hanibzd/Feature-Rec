@@ -53,9 +53,13 @@ Onboarding a repository takes three actions, with no configuration file:
    variable and `FEATURE_REC_RUNNER_TOKEN`/`ANTHROPIC_API_KEY` secrets.
 3. Invite `@Feature-Rec` to the Slack review channel.
 
-Validations for every repo in a workspace go to the channel where the bot was first introduced;
-removing the bot from that channel promotes the next oldest. Mentions and approver restrictions
-are set per channel with `/feature-rec` slash commands. Everything else is fixed: the
+Validations for every repo in a workspace go to one explicitly selected review channel. The first
+channel that `@Feature-Rec` joins is selected automatically; later joins are silent. Anyone in the
+workspace can switch the destination from any conversation or DM with
+`/feature-rec channel #channel-name`, provided the bot is in the target channel. Removing the bot
+from the selected channel does not fail over. Mentions and approver restrictions are stored per
+channel and changed for the selected channel with `/feature-rec` slash commands. Every configured
+user and every member of a configured usergroup must belong to that channel. Everything else is fixed: the
 `Feature-Rec` check name, the Slack button labels, and the PR comments posted after approval or
 rejection, which mention the PR author. See [`docs/feature-rec.md`](docs/feature-rec.md) for the
 full GitHub App, Slack App, and target repository setup.

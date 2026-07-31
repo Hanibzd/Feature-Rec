@@ -13,11 +13,9 @@ export type StartCycleResult = {
   | { created: false; attemptId: null }
 );
 
-export type BotChannel = {
+export type TeamChannelRoute = {
   teamId: string;
-  channelId: string;
-  joinedAt: string | null;
-  firstSeenAt: string;
+  selectedChannelId: string;
 };
 
 export type ChannelSettings = {
@@ -53,30 +51,15 @@ export type CycleStore = {
     messageTs: string,
   ): Promise<ReviewCycleStatus>;
   recordProcessedInteraction(id: string, cycleId: string): Promise<boolean>;
-  // Reconcile bot channel membership from a poll: upsert first/last seen,
-  // mark missing rows left, and reset ordering on rejoin. seenAt is when the
-  // snapshot was taken, so rows seen since then are never reaped by stale data.
-  // Returns the newly promoted channel when this snapshot removes the active
-  // channel. The caller owns the human-facing promotion notice.
-  syncBotChannels(input: {
-    teamId: string;
-    channelIds: string[];
-    seenAt: string;
-  }): Promise<string | null>;
-  // Channels the bot is currently in, oldest introduction first.
-  activeBotChannels(teamId: string): Promise<BotChannel[]>;
-  recordChannelJoin(input: {
+  getTeamChannelRoute(teamId: string): Promise<TeamChannelRoute | null>;
+  initializeTeamChannelRoute(input: {
     teamId: string;
     channelId: string;
-    joinedAt: string;
+  }): Promise<{ initializedRoute: boolean }>;
+  selectTeamChannel(input: {
+    teamId: string;
+    channelId: string;
   }): Promise<void>;
-  // Reports whether the leave was applied and the newly promoted channel when
-  // it removed the active channel. Stale or duplicate leaves are not applied.
-  recordChannelLeave(input: {
-    teamId: string;
-    channelId: string;
-    leftAt: string;
-  }): Promise<{ applied: boolean; promotedChannelId: string | null }>;
   getChannelSettings(teamId: string, channelId: string): Promise<ChannelSettings | null>;
   setMention(input: {
     teamId: string;
@@ -84,11 +67,23 @@ export type CycleStore = {
     mention: string;
     updatedBy: string;
   }): Promise<void>;
+  setSelectedChannelMention(input: {
+    teamId: string;
+    expectedChannelId: string;
+    mention: string;
+    updatedBy: string;
+  }): Promise<boolean>;
   setApprovers(input: {
     teamId: string;
     channelId: string;
     approvers: string[] | null;
     updatedBy: string;
   }): Promise<void>;
+  setSelectedChannelApprovers(input: {
+    teamId: string;
+    expectedChannelId: string;
+    approvers: string[] | null;
+    updatedBy: string;
+  }): Promise<boolean>;
   close(): Promise<void>;
 };

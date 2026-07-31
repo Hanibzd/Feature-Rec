@@ -1,5 +1,9 @@
 # Seamless Slack Onboarding — Architecture & Dev Plan
 
+> **Superseded routing behavior:** The queue, failover, ranked greetings, and leave-event behavior
+> in this historical plan are replaced by
+> [`explicit-slack-channel-selection-plan.md`](explicit-slack-channel-selection-plan.md).
+
 ## Goal
 
 Onboarding a target repo takes three actions, with no YAML editing:

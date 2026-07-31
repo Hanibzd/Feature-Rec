@@ -51,9 +51,15 @@ export interface ChannelSettingsTable {
   updated_at: ColumnType<Date, string, string>;
 }
 
+export interface TeamChannelRoutesTable {
+  team_id: string;
+  selected_channel_id: string;
+}
+
 export interface DB {
   review_cycles: ReviewCyclesTable;
   processed_interactions: ProcessedInteractionsTable;
   bot_channels: BotChannelsTable;
   channel_settings: ChannelSettingsTable;
+  team_channel_routes: TeamChannelRoutesTable;
 }
