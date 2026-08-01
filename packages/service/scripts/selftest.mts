@@ -539,7 +539,7 @@ try {
       false,
     );
     assert.equal(githubCalls[2].url.endsWith("/repos/MathFreedom/Agora/issues/1/comments"), true);
-    assert.equal(githubCalls[2].body.body, "@romain validation passed; you can merge.");
+    assert.equal(githubCalls[2].body.body, "@romain validation passed, you can merge.");
     assert.equal(githubCalls[3].url.endsWith("/repos/MathFreedom/Agora/check-runs/123"), true);
     assert.equal(
       (githubCalls[3].body.output as { summary: string }).summary.includes("issuecomment-9"),

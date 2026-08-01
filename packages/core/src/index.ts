@@ -86,7 +86,7 @@ export function isAllowedPullRequestEvent(event: {
 }
 
 export const GITHUB_CHECK_NAME = "Feature-Rec";
-export const GITHUB_ACCEPT_COMMENT = "@{pr_author} validation passed; you can merge.";
+export const GITHUB_ACCEPT_COMMENT = "@{pr_author} validation passed, you can merge.";
 export const GITHUB_REJECT_COMMENT = "@{pr_author} make the following changes:\n\n{review_comment}";
 
 export const SLACK_GREETING_ACTIVE =

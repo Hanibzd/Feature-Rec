@@ -13,7 +13,7 @@ import {
 
 assert.equal(
   renderTemplate(GITHUB_ACCEPT_COMMENT, { pr_author: "romain" }),
-  "@romain validation passed; you can merge.",
+  "@romain validation passed, you can merge.",
 );
 assert.equal(
   renderTemplate(GITHUB_REJECT_COMMENT, {
