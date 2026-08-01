@@ -1664,14 +1664,22 @@ try {
   // --- Real SlackClient.listChannelMembers: cursor pagination ---
   {
     const previousFetch = globalThis.fetch;
-    const requests: Array<{ channel?: string; cursor?: string; limit?: number }> = [];
-    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as {
-        channel?: string;
-        cursor?: string;
-        limit?: number;
-      };
-      requests.push(body);
+    const requests: Array<{
+      method?: string;
+      channel: string | null;
+      cursor: string | null;
+      limit: string | null;
+      body?: BodyInit | null;
+    }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      requests.push({
+        method: init?.method,
+        channel: url.searchParams.get("channel"),
+        cursor: url.searchParams.get("cursor"),
+        limit: url.searchParams.get("limit"),
+        body: init?.body,
+      });
       const page = requests.length === 1
         ? { ok: true, members: ["U1", "U2"], response_metadata: { next_cursor: "members2" } }
         : { ok: true, members: ["U3"], response_metadata: { next_cursor: "" } };
@@ -1687,9 +1695,32 @@ try {
       globalThis.fetch = previousFetch;
     }
     assert.deepEqual(requests, [
-      { channel: "CMEMBERS", limit: 200 },
-      { channel: "CMEMBERS", cursor: "members2", limit: 200 },
+      { method: "GET", channel: "CMEMBERS", cursor: null, limit: "200", body: undefined },
+      { method: "GET", channel: "CMEMBERS", cursor: "members2", limit: "200", body: undefined },
     ]);
+  }
+
+  // --- Slack API validation details remain visible in errors ---
+  {
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          ok: false,
+          error: "invalid_arguments",
+          response_metadata: { messages: ["[ERROR] invalid channel argument"] },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+    try {
+      const client = new SlackClient({ ...env, slackBotToken: "xoxb-test" });
+      await assert.rejects(
+        client.listChannelMembers("CBAD"),
+        /Slack conversations\.members failed: invalid_arguments \(\[ERROR\] invalid channel argument\)/,
+      );
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
   }
 
   // --- Real SlackClient.listUsergroups: disabled groups are excluded upstream ---
