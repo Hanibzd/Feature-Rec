@@ -27,29 +27,43 @@ channel. Legacy `.github/feature-rec-config.yaml` files are ignored; delete them
 
 ## Channel Routing
 
-All repos in a Slack workspace share one review channel: the channel where the bot was first
-introduced. If the bot is in several channels, the oldest introduction wins; removing it from the
-active channel promotes the next oldest, and the promoted channel is notified. Rejoining a channel
-puts it at the back of the queue. The channel is resolved when each validation is posted — never
-from cached configuration. Membership is honored exactly as reported by Slack, with no
+All repos in a Slack workspace share one explicitly selected review channel. The first channel
+where the bot joins is selected automatically and receives the active greeting; later joins are
+silent. Anyone in the workspace can select another channel with
+`/feature-rec channel #channel-name` as long as the bot is currently a member of the target.
+Removing the bot from the selected channel does not promote or notify another channel. The route is
+retained, so re-inviting the bot resumes delivery there; alternatively, run the channel command from
+any workspace conversation or DM to switch. The selected channel is checked against live Slack
+membership when each validation is posted. Membership is honored exactly as reported by Slack, with no
 shared-channel filtering. **Do not invite `@Feature-Rec` to externally shared (Slack Connect)
 channels**: validation videos and PR information will be posted there, visible to the external
 organization. Every message identifies its repo as `owner/repo#N`.
 
-When the bot joins a channel it greets with its rank: the active channel gets "Connected,
-validation requests will appear in this channel"; later channels are told where validations
-currently go and how to change that. If no channel is available when a validation is ready, the
-Check Run fails with "Invite @Feature-Rec to your Slack review channel, then re-run."
+If there is no saved route and exactly one live membership, delivery repairs a missed first-join
+event by selecting it and emits the same active greeting after rechecking the live route. With
+several memberships it refuses to guess and asks a user to run the channel command. If the selected
+channel is unavailable when a validation is ready, no Slack message is posted and the Check Run
+fails with instructions to re-invite the bot or select another channel.
 
 ## Slash Commands
 
-`/feature-rec` configures the channel it is typed in; every reply is ephemeral:
+`/feature-rec` can be run from any conversation or DM in the installed workspace; every reply is
+ephemeral. Setting commands always read and update the selected review channel, not the invocation
+conversation:
 
 | Command | Effect |
 | --- | --- |
-| `/feature-rec mention @here\|@channel\|@usergroup\|@user…\|off` | Who validation requests mention. Default `@here`; several targets are allowed; `off` disables the mention. No target shows the current value. |
-| `/feature-rec approvers @usergroup\|@user…\|everyone` | Restrict who may use the approval buttons. Default: everyone in the channel. `everyone` clears the restriction. No argument shows the current list. Unauthorized clicks are answered ephemerally with "Only … can approve." |
-| `/feature-rec status` | Show the routing channel, mention, approvers, and the fallback queue. |
+| `/feature-rec channel #channel-name` | Select a public or private bot channel as the workspace review destination. The target must be an escaped Slack channel mention. Existing mention and approver settings for that channel are preserved. |
+| `/feature-rec mention @here\|@channel\|@usergroup\|@user…` | Who validation requests mention. Default `@here`; several targets are allowed. No target shows the current value. |
+| `/feature-rec approvers @channel\|@usergroup\|@user…` | Restrict who may use the approval buttons. Default: everyone in the channel. `@channel` clears the restriction. No argument shows the current list. Unauthorized clicks are answered ephemerally with "Only … can approve." |
+| `/feature-rec status` | Show the selected channel, its current availability, mention, and approvers. |
+
+Direct users and every member returned for a selected active usergroup must belong to the selected
+channel. Disabled usergroups are excluded from Slack lookups, and empty usergroups are rejected.
+`@here` and `@channel` do not need individual membership validation. A channel switch itself does
+not revalidate or rewrite saved settings; use the mention or approvers command to repair stale
+settings after a switch. Previously stored empty mention values remain readable as `off`, but the
+command no longer creates them.
 
 ## Local Demo Backend
 
@@ -180,7 +194,7 @@ For quick local testing, `FEATURE_REC_GITHUB_TOKEN` can be used as a fallback, b
 
 Create a Slack App with bot scopes:
 
-- `chat:write` — post validation messages, greetings, and notices
+- `chat:write` — post validation messages and the first-channel greeting
 - `files:write` — upload the demo video
 - `views:write` — open the request-changes modal
 - `usergroups:read` — resolve usergroup handles and expand approver groups
@@ -188,6 +202,10 @@ Create a Slack App with bot scopes:
 - `groups:read` — same for private channels
 - `commands` — added automatically with the `/feature-rec` slash command; must be
   listed explicitly in the OAuth scopes when the app is distributed
+
+`channels:read` and `groups:read` also cover the `conversations.members` checks used
+when changing mentions or approvers, so explicit channel selection adds no OAuth
+scope and does not require reinstalling an already configured app.
 
 Configure, replacing `<host>` with the public backend origin (or the ngrok host locally):
 
@@ -197,13 +215,14 @@ Event Subscriptions Request URL: https://<host>/api/slack/events
 Slash command: /feature-rec -> https://<host>/api/slack/commands
 ```
 
-- Subscribe the events URL to the `member_joined_channel` and `member_left_channel` bot events and
+- Subscribe the events URL to the `member_joined_channel` bot event and
   enable **Delayed Events**: after Slack's immediate/1 min/5 min retries, delivery retries hourly
   for 24 hours, and apps below 1,000 events per hour are exempt from auto-disable, so a temporarily
-  down backend cannot lose the subscription. Missed events only affect greetings, promotion
-  notices, and ordering detail — routing itself is re-polled before every validation post.
+  down backend cannot lose the subscription. A missed first join can be repaired automatically
+  only when the bot has exactly one channel membership; otherwise use the channel command.
 - On the `/feature-rec` slash command, enable **Escape channels, users, and links sent to your
-  app** so user mentions arrive as `<@U…>` ids.
+  app** so channel and user mentions arrive with stable `<#C…>` and `<@U…>` ids. Plain channel
+  names are intentionally not resolved.
 - Reinstall the app after changing scopes. When upgrading a live install, update the Slack app
   first and deploy the service second: the new grants sit unused until the deploy, so no
   `missing_scope` window exists. If deployed backwards, `missing_scope` surfaces through the same
@@ -248,3 +267,9 @@ pnpm typecheck
 pnpm feature-rec:selftest
 pnpm --filter @autodemo/cli exec tsx scripts/validate-selftest.mts
 ```
+
+In a staging Slack workspace, also verify that the first join gets one greeting and later joins are
+silent; switch from a DM and confirm there is one ephemeral reply and no channel-visible post;
+confirm the target channel's saved mention/approvers survive the switch; reject a mention or
+approver whose usergroup contains a non-member; and remove the selected channel to confirm delivery
+fails without moving to another membership, then re-invite it and confirm delivery resumes.

@@ -116,6 +116,11 @@ type ConversationsPage = {
   response_metadata?: { next_cursor?: string };
 };
 
+type ConversationMembersPage = {
+  members?: string[];
+  response_metadata?: { next_cursor?: string };
+};
+
 export class SlackClient {
   #env: ServiceEnv;
   #identity: Promise<BotIdentity> | null = null;
@@ -167,13 +172,41 @@ export class SlackClient {
     return channelIds;
   }
 
+  async listChannelMembers(channelId: string): Promise<string[]> {
+    const members: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await slackApi<ConversationMembersPage>(
+        this.#env,
+        "conversations.members",
+        {
+          channel: channelId,
+          limit: 200,
+          ...(cursor ? { cursor } : {}),
+        },
+      );
+      members.push(...(page.members ?? []));
+      cursor = page.response_metadata?.next_cursor || undefined;
+    } while (cursor);
+    return members;
+  }
+
   async listUsergroups(): Promise<SlackUsergroup[]> {
-    const res = await slackApi<{ usergroups?: Array<{ id: string; handle: string }> }>(
-      this.#env,
-      "usergroups.list",
-      { include_disabled: false },
-    );
-    return (res.usergroups ?? []).map((group) => ({ id: group.id, handle: group.handle }));
+    const res = await slackApi<{
+      usergroups?: Array<{ id: string; handle: string }>;
+    }>(this.#env, "usergroups.list", { include_disabled: false });
+    return (res.usergroups ?? []).map((group) => ({
+      id: group.id,
+      handle: group.handle,
+    }));
+  }
+
+  async listUsergroupMembers(usergroupId: string): Promise<string[]> {
+    const res = await slackApi<{ users?: string[] }>(this.#env, "usergroups.users.list", {
+      usergroup: usergroupId,
+      include_disabled: false,
+    });
+    return res.users ?? [];
   }
 
   async postMessage(channelId: string, text: string): Promise<void> {
@@ -245,14 +278,9 @@ export class SlackClient {
     const usergroups = approvers.filter((id) => /^S[A-Z0-9]+$/.test(id));
     if (usergroups.length === 0) return false;
     const memberships = await Promise.all(
-      usergroups.map((usergroup) =>
-        slackApi<{ users: string[] }>(this.#env, "usergroups.users.list", {
-          usergroup,
-          include_disabled: false,
-        }),
-      ),
+      usergroups.map((usergroup) => this.listUsergroupMembers(usergroup)),
     );
-    return memberships.some((membership) => membership.users.includes(userId));
+    return memberships.some((membership) => membership.includes(userId));
   }
 
   async finalize(

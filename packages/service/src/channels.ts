@@ -1,42 +1,50 @@
-import { SLACK_NO_CHANNEL_MESSAGE } from "@feature-rec/core";
+import {
+  SLACK_MULTIPLE_CHANNELS_MESSAGE,
+  SLACK_NO_CHANNEL_MESSAGE,
+  slackSelectedChannelUnavailableMessage,
+} from "@feature-rec/core";
 import type { SlackClient } from "./slack";
-import type { BotChannel, CycleStore } from "./storage";
+import type { CycleStore } from "./storage";
 
 export class ChannelResolutionError extends Error {}
 
-export type TenantChannels = {
-  teamId: string;
-  channels: BotChannel[];
-  promotedChannelId: string | null;
-};
-
-// One membership sweep per call: poll Slack, reconcile bot_channels, and
-// return the tenant's active channels, oldest introduction first. The tenant
-// is the bot token's workspace today; multitenancy replaces only that lookup.
-export async function syncTenantChannels(
-  store: CycleStore,
-  slack: SlackClient,
-): Promise<TenantChannels> {
-  const identity = await slack.botIdentity();
-  const seenAt = new Date().toISOString();
-  const channelIds = await slack.listBotChannels();
-  const promotedChannelId = await store.syncBotChannels({
-    teamId: identity.teamId,
-    channelIds,
-    seenAt,
-  });
-  const channels = await store.activeBotChannels(identity.teamId);
-  return { teamId: identity.teamId, channels, promotedChannelId };
-}
-
-// Resolved at post time, never from cached config: removing the bot from the
-// active channel promotes the next oldest on the very next post.
+// Resolved at post time from the explicit workspace route and a transient live
+// membership poll. Slack membership snapshots are never persisted.
 export async function resolveChannel(
   store: CycleStore,
   slack: SlackClient,
-): Promise<{ teamId: string; channelId: string; promotedChannelId: string | null }> {
-  const { teamId, channels, promotedChannelId } = await syncTenantChannels(store, slack);
-  const active = channels[0];
-  if (!active) throw new ChannelResolutionError(SLACK_NO_CHANNEL_MESSAGE);
-  return { teamId, channelId: active.channelId, promotedChannelId };
+): Promise<{ teamId: string; channelId: string; initializedRoute: boolean }> {
+  const { teamId } = await slack.botIdentity();
+  const channelIds = await slack.listBotChannels();
+  const selectedChannelId = await store.getSelectedChannelId(teamId);
+
+  if (selectedChannelId) {
+    if (!channelIds.includes(selectedChannelId)) {
+      throw new ChannelResolutionError(
+        slackSelectedChannelUnavailableMessage(selectedChannelId),
+      );
+    }
+    return { teamId, channelId: selectedChannelId, initializedRoute: false };
+  }
+
+  if (channelIds.length === 0) throw new ChannelResolutionError(SLACK_NO_CHANNEL_MESSAGE);
+  if (channelIds.length > 1) {
+    throw new ChannelResolutionError(SLACK_MULTIPLE_CHANNELS_MESSAGE);
+  }
+
+  const channelId = channelIds[0];
+  const initialized = await store.initializeTeamChannelRoute({ teamId, channelId });
+  if (initialized.initializedRoute) return { teamId, channelId, initializedRoute: true };
+
+  // A join event or command won the initialization race. Honor that route,
+  // provided it is still represented by the resolver's membership snapshot.
+  const currentChannelId = await store.getSelectedChannelId(teamId);
+  if (currentChannelId && channelIds.includes(currentChannelId)) {
+    return { teamId, channelId: currentChannelId, initializedRoute: false };
+  }
+  throw new ChannelResolutionError(
+    currentChannelId
+      ? slackSelectedChannelUnavailableMessage(currentChannelId)
+      : SLACK_NO_CHANNEL_MESSAGE,
+  );
 }
