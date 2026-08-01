@@ -4,6 +4,7 @@ import * as channelRouting from "./0002_channel_routing";
 import * as nullableLegacyConfig from "./0003_nullable_legacy_config";
 import * as lastLeftAt from "./0004_last_left_at";
 import * as explicitChannelRouting from "./0005_explicit_channel_routing";
+import * as dropLegacyBotChannels from "./0006_drop_legacy_bot_channels";
 
 // Static import map (not FileMigrationProvider) so migrations resolve under
 // tsx and any future bundling without filesystem lookups.
@@ -13,6 +14,7 @@ const migrations: Record<string, Migration> = {
   "0003_nullable_legacy_config": nullableLegacyConfig,
   "0004_last_left_at": lastLeftAt,
   "0005_explicit_channel_routing": explicitChannelRouting,
+  "0006_drop_legacy_bot_channels": dropLegacyBotChannels,
 };
 
 export const migrationProvider: MigrationProvider = {

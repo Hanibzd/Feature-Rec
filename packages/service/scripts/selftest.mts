@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { Kysely, PostgresDialect } from "kysely";
+import { Kysely, PostgresDialect, sql } from "kysely";
 import { Migrator } from "kysely/migration";
 import { Client, Pool } from "pg";
 import {
@@ -411,7 +411,7 @@ const store = new PostgresCycleStore(testUrl);
 await store.init();
 
 try {
-  // --- Migration 0005 backfills the effective active route and preserves settings ---
+  // --- Migration 0005 backfills routes; 0006 drops only legacy memberships ---
   {
     const migrationDbName = `${dbName}_migration`;
     const migrationAdmin = new Client({ connectionString: adminUrl });
@@ -450,19 +450,59 @@ try {
       `);
       await seed.end();
 
+      const settingsBeforeCleanup = await migrationDb
+        .selectFrom("channel_settings")
+        .selectAll()
+        .orderBy("channel_id")
+        .execute();
+      const legacyTableName = async (): Promise<string | null> =>
+        sql<{ relation: string | null }>`
+          select to_regclass('public.bot_channels')::text as relation
+        `
+          .execute(migrationDb)
+          .then((result) => result.rows[0]?.relation ?? null);
+
       const latest = await migrator.migrateToLatest();
       if (latest.error) throw latest.error;
       const routes = await migrationDb.selectFrom("team_channel_routes").selectAll().execute();
       assert.deepEqual(routes, [
         { team_id: "TBACKFILL", selected_channel_id: "COLDEST" },
       ]);
-      assert.equal(
+      assert.deepEqual(
         await migrationDb
           .selectFrom("channel_settings")
-          .select(({ fn }) => fn.countAll<string>().as("count"))
-          .executeTakeFirstOrThrow()
-          .then((row) => row.count),
-        "2",
+          .selectAll()
+          .orderBy("channel_id")
+          .execute(),
+        settingsBeforeCleanup,
+      );
+      assert.equal(await legacyTableName(), null);
+
+      // Down recreates only the empty legacy shape; it cannot restore history.
+      const down = await migrator.migrateDown();
+      if (down.error) throw down.error;
+      assert.equal(await legacyTableName(), "bot_channels");
+      assert.equal(
+        await sql<{ count: string }>`select count(*)::text as count from bot_channels`
+          .execute(migrationDb)
+          .then((result) => result.rows[0]?.count),
+        "0",
+      );
+
+      const cleanupAgain = await migrator.migrateToLatest();
+      if (cleanupAgain.error) throw cleanupAgain.error;
+      assert.equal(await legacyTableName(), null);
+      assert.deepEqual(
+        await migrationDb.selectFrom("team_channel_routes").selectAll().execute(),
+        routes,
+      );
+      assert.deepEqual(
+        await migrationDb
+          .selectFrom("channel_settings")
+          .selectAll()
+          .orderBy("channel_id")
+          .execute(),
+        settingsBeforeCleanup,
       );
     } finally {
       await migrationDb.destroy();
@@ -1215,15 +1255,8 @@ try {
     assert.equal(slack.postMessageCalls.length, 1);
     assert.equal(await store.getSelectedChannelId("TEVT"), "CE1");
 
-    // Runtime events never write legacy membership rows.
-    const probe = new Client({ connectionString: testUrl });
-    await probe.connect();
-    const legacyRows = await probe.query<{ count: string }>(
-      "select count(*) from bot_channels where team_id = $1",
-      ["TEVT"],
-    );
-    await probe.end();
-    assert.equal(legacyRows.rows[0].count, "0");
+    // Runtime events persist only the explicit route. The migration-chain test
+    // above verifies that the legacy membership table no longer exists.
   }
 
   // --- Commands: mention set/echo/bad-handle, approvers, status, usage ---
