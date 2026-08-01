@@ -39,10 +39,10 @@ the command was invoked is reply context only and does not need to contain the
 bot.
 - For a usergroup mention or approver target, every user returned by
 `usergroups.users.list` must belong to the selected channel. Disabled
-usergroups cannot be selected, and a group with no users is rejected. Direct
-user mentions are checked individually.
-`@here`, `@channel`, `off`, and `everyone` are channel-relative/default values
-and require no individual membership check.
+usergroups are excluded from `usergroups.list`, and a group with no users is
+rejected. Direct user mentions are checked individually. `@here` and
+`@channel` are channel-relative/default values and require no individual
+membership check.
 - Leaving the selected channel does **not** promote another channel. The explicit
 selection is retained, but it is unavailable until the bot rejoins or a user
 selects another bot channel. This preserves user intent and lets a rejoin resume
@@ -145,19 +145,10 @@ post-deployment cleanup phase below, after the rollback window closes.
 
 ### New store types and methods
 
-Add a `TeamChannelRoute` type and replace queue/promotion operations with explicit
-routing operations:
+Replace queue/promotion operations with explicit routing operations. Planned
+`CycleStore` operations:
 
-```ts
-type TeamChannelRoute = {
-  teamId: string;
-  selectedChannelId: string;
-};
-```
-
-Planned `CycleStore` operations:
-
-- `getTeamChannelRoute(teamId)` returns the explicit route or `null`.
+- `getSelectedChannelId(teamId)` returns the selected channel ID or `null`.
 - `initializeTeamChannelRoute(...)` inserts the first route with
 `ON CONFLICT DO NOTHING`, returns `{ initializedRoute: boolean }`, and does not
 write `bot_channels` or `channel_settings`.
@@ -212,6 +203,11 @@ poll Slack and initialize automatically only when the bot belongs to exactly one
 channel. If several memberships exist, it must not guess which was first; return
 an actionable error asking a user to run `/feature-rec channel #channel`.
 
+The `/start` onboarding probe is read-only. It reports a usable selected route as
+onboarded and also reports a sole membership as onboarded because `/video` can use
+the missed-event fallback, but it never initializes the route itself. Route writes
+remain limited to join events, `/video` fallback, and `/feature-rec channel`.
+
 Two simultaneous first joins serialize on the advisory lock. The first observed
 join creates the route and the other route insert becomes a silent no-op. No
 membership ordering is maintained after this change.
@@ -223,8 +219,10 @@ memberships, neither of which is part of the target design.
 
 Refactor `resolveChannel`:
 
-1. Fetch the bot identity and explicit team route.
-2. Poll `users.conversations` without persisting its result.
+1. Fetch the bot identity.
+2. Poll `users.conversations` without persisting its result, then read the
+  explicit team route so a channel command committed during the Slack poll is
+  observed.
 3. If a route exists, return it only when the selected channel appears in the live
   membership result.
 4. If no route exists and exactly one live bot channel exists, initialize that
@@ -348,7 +346,7 @@ invocation channel never selects a settings row.
 - Fetch the selected channel’s complete member set once per command.
 - Reject the entire command if any resolved user is missing. Do not persist a
 partial list.
-- `@here`, `@channel`, and `off` remain valid without expanding members.
+- `@here` and `@channel` remain valid without expanding members.
 - With no arguments, show the selected channel’s setting and identify that channel
 in the response.
 
@@ -366,10 +364,10 @@ selected-channel lookup and strict membership validation:
 
 - Direct users must be channel members.
 - Every user returned for every selected usergroup must be a channel member.
-- Disabled usergroups cannot be selected.
+- Request only active usergroups with `include_disabled: false`.
 - Empty usergroups are rejected because they would leave a validation with no
 eligible approver.
-- `everyone` clears the restriction without a member lookup.
+- `@channel` clears the restriction without a member lookup.
 - Store nothing unless every target passes.
 - No arguments show the selected channel’s approvers and identify that channel.
 
@@ -391,7 +389,7 @@ behavior in the staging smoke test.
 eligible person in that channel may be able to approve it.
 - This is an accepted recoverable state. Slash commands work from any workspace
 conversation, so a customer can run `/feature-rec mention ...`,
-`/feature-rec approvers ...`, or `/feature-rec approvers everyone` to repair the
+`/feature-rec approvers ...`, or `/feature-rec approvers @channel` to repair the
 selected channel.
 - Switching channels preserves existing settings without revalidating their
 members. Membership is checked only when `/feature-rec mention` or
@@ -405,7 +403,10 @@ Update `/feature-rec status`:
 - Show mention and approver settings for the selected channel.
 - Remove fallback/queue copy entirely.
 - If the selected channel is unavailable, explain how to re-invite or switch.
-- If no route exists, show the existing onboarding instruction.
+- If no route exists with no memberships, show the existing onboarding
+  instruction. With exactly one membership, explain that the bot is already
+  present and ask the user to select that channel explicitly. With multiple
+  memberships, ask the user to choose one.
 
 Add the channel command to `COMMAND_USAGE` and remove all queue language.
 
@@ -420,8 +421,8 @@ Add the channel command to `COMMAND_USAGE` and remove all queue language.
 2. Commit that idempotent route insert before acknowledging.
 3. Return 200.
 4. Only when this join initialized the route, and only on the first event delivery,
-  asynchronously poll Slack once and confirm that the joined channel is still
-   both selected and present.
+  asynchronously poll Slack once, then read the selected route and confirm that
+  the joined channel is still both selected and present.
 5. Post `SLACK_GREETING_ACTIVE`.
 
 If a route already exists, the `ON CONFLICT DO NOTHING` insert loses. Acknowledge
@@ -489,6 +490,10 @@ and HTTP 422.
 - Rejoining the selected channel resumes delivery.
 - Two repositories in one team share the explicit route.
 - A mid-cycle switch is observed at video-post time.
+- The `/start` onboarding probe recognizes a sole membership without writing a
+  route; `/video` subsequently initializes the missed-event fallback.
+- Route reads occur after membership polls, so switches committed during the poll
+  are observed.
 
 ### Event tests
 
@@ -499,6 +504,7 @@ Update the current greeting/promotion block:
 - Second and third bot joins post nothing and write no membership rows.
 - Non-bot joins remain ignored and unlogged.
 - A live poll that notices the selected channel’s removal posts nothing.
+- Greeting confirmation reads the selected route after its membership poll.
 
 Assert `postMessageCalls` explicitly so the absence of queue and promotion notices
 is regression-protected.
@@ -533,10 +539,13 @@ For both mention and approver commands:
 unchanged.
 - A usergroup whose complete returned membership is in the channel succeeds.
 - A usergroup with one missing member fails atomically.
-- A disabled usergroup fails.
 - An empty usergroup fails.
 - Multiple targets are deduplicated before validation.
-- `@here`, `@channel`, `off`, and `everyone` retain their special behavior.
+- `@here` and `@channel` retain their special behavior; `@channel` clears an
+  approver restriction without member validation.
+- `off` is rejected for mentions, while a previously stored empty mention remains
+  readable for backward compatibility. `everyone` and `off` are rejected for
+  approvers.
 - Mention and approver commands always update the selected video channel’s settings, regardless of where the command is invoked.
 - An unavailable selected route prevents settings changes.
 - Paginated `conversations.members` responses are fully consumed.
@@ -552,7 +561,7 @@ and approver settings.
 - A stale saved mention does not prevent video upload or validation-message
 posting.
 - A stale approver restriction can leave no eligible clicker, and
-`/feature-rec approvers everyone` restores approval access.
+`/feature-rec approvers @channel` restores approval access.
 - A validation already posted in the previous channel continues using that
 channel’s approver settings.
 - A later approver change in the new selected channel does not affect pending

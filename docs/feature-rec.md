@@ -54,14 +54,16 @@ conversation:
 | Command | Effect |
 | --- | --- |
 | `/feature-rec channel #channel-name` | Select a public or private bot channel as the workspace review destination. The target must be an escaped Slack channel mention. Existing mention and approver settings for that channel are preserved. |
-| `/feature-rec mention @here\|@channel\|@usergroup\|@user…\|off` | Who validation requests mention. Default `@here`; several targets are allowed; `off` disables the mention. No target shows the current value. |
-| `/feature-rec approvers @usergroup\|@user…\|everyone` | Restrict who may use the approval buttons. Default: everyone in the channel. `everyone` clears the restriction. No argument shows the current list. Unauthorized clicks are answered ephemerally with "Only … can approve." |
+| `/feature-rec mention @here\|@channel\|@usergroup\|@user…` | Who validation requests mention. Default `@here`; several targets are allowed. No target shows the current value. |
+| `/feature-rec approvers @channel\|@usergroup\|@user…` | Restrict who may use the approval buttons. Default: everyone in the channel. `@channel` clears the restriction. No argument shows the current list. Unauthorized clicks are answered ephemerally with "Only … can approve." |
 | `/feature-rec status` | Show the selected channel, its current availability, mention, and approvers. |
 
-Direct users and every member returned for a selected usergroup must belong to the selected channel.
-Disabled and empty usergroups are rejected. `@here`, `@channel`, `off`, and `everyone` do not need
-individual membership validation. A channel switch itself does not revalidate or rewrite saved
-settings; use the mention or approvers command to repair stale settings after a switch.
+Direct users and every member returned for a selected active usergroup must belong to the selected
+channel. Disabled usergroups are excluded from Slack lookups, and empty usergroups are rejected.
+`@here` and `@channel` do not need individual membership validation. A channel switch itself does
+not revalidate or rewrite saved settings; use the mention or approvers command to repair stale
+settings after a switch. Previously stored empty mention values remain readable as `off`, but the
+command no longer creates them.
 
 ## Local Demo Backend
 

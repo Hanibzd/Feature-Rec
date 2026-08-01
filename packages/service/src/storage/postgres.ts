@@ -230,17 +230,13 @@ export class PostgresCycleStore implements CycleStore {
     return (result.numInsertedOrUpdatedRows ?? 0n) > 0n;
   }
 
-  async getTeamChannelRoute(
-    teamId: string,
-  ): Promise<{ teamId: string; selectedChannelId: string } | null> {
+  async getSelectedChannelId(teamId: string): Promise<string | null> {
     const row = await this.#db
       .selectFrom("team_channel_routes")
-      .selectAll()
+      .select("selected_channel_id")
       .where("team_id", "=", teamId)
       .executeTakeFirst();
-    return row
-      ? { teamId: row.team_id, selectedChannelId: row.selected_channel_id }
-      : null;
+    return row?.selected_channel_id ?? null;
   }
 
   async initializeTeamChannelRoute(input: {

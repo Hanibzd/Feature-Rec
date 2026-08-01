@@ -13,7 +13,6 @@ export type BotIdentity = {
 export type SlackUsergroup = {
   id: string;
   handle: string;
-  disabled?: boolean;
 };
 
 function timingSafeStringEqual(left: string, right: string): boolean {
@@ -194,12 +193,11 @@ export class SlackClient {
 
   async listUsergroups(): Promise<SlackUsergroup[]> {
     const res = await slackApi<{
-      usergroups?: Array<{ id: string; handle: string; date_delete?: number }>;
-    }>(this.#env, "usergroups.list", { include_disabled: true });
+      usergroups?: Array<{ id: string; handle: string }>;
+    }>(this.#env, "usergroups.list", { include_disabled: false });
     return (res.usergroups ?? []).map((group) => ({
       id: group.id,
       handle: group.handle,
-      disabled: Boolean(group.date_delete),
     }));
   }
 

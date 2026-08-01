@@ -13,13 +13,8 @@ export type StartCycleResult = {
   | { created: false; attemptId: null }
 );
 
-export type TeamChannelRoute = {
-  teamId: string;
-  selectedChannelId: string;
-};
-
 export type ChannelSettings = {
-  // Rendered mrkdwn mention prefix; null = default (@here), "" = off.
+  // Rendered mrkdwn mention prefix; null = default (@here), "" = legacy off.
   mention: string | null;
   // Slack S…/U… ids; null = everyone in the channel may approve.
   approvers: string[] | null;
@@ -51,7 +46,7 @@ export type CycleStore = {
     messageTs: string,
   ): Promise<ReviewCycleStatus>;
   recordProcessedInteraction(id: string, cycleId: string): Promise<boolean>;
-  getTeamChannelRoute(teamId: string): Promise<TeamChannelRoute | null>;
+  getSelectedChannelId(teamId: string): Promise<string | null>;
   initializeTeamChannelRoute(input: {
     teamId: string;
     channelId: string;

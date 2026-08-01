@@ -127,7 +127,7 @@ function makeSlackStub(options: { teamId?: string; channels?: string[] } = {}) {
   const finalizeCalls: Array<{ state: string; channel: string; ts: string }> = [];
   const stub = {
     channels: options.channels ?? ["C0123"],
-    usergroups: [] as Array<{ id: string; handle: string; disabled?: boolean }>,
+    usergroups: [] as Array<{ id: string; handle: string }>,
     usergroupMembers: {} as Record<string, string[]>,
     channelMembers: {} as Record<string, string[]>,
     postMessageCalls: [] as Array<{ channel: string; text: string }>,
@@ -140,7 +140,7 @@ function makeSlackStub(options: { teamId?: string; channels?: string[] } = {}) {
     finalizeCalls,
     botIdentity: async () => ({ userId: "UBOT", teamId }),
     listBotChannels: async (): Promise<string[]> => [...stub.channels],
-    listUsergroups: async (): Promise<Array<{ id: string; handle: string; disabled?: boolean }>> =>
+    listUsergroups: async (): Promise<Array<{ id: string; handle: string }>> =>
       stub.usergroups,
     listChannelMembers: async (channelId: string): Promise<string[]> => [
       ...(stub.channelMembers[channelId] ?? []),
@@ -919,6 +919,31 @@ try {
 
   // --- Explicit channel routing: fallback, selection, no failover, guards ---
   {
+    let membershipSweepCompleted = false;
+    const serializedStore = {
+      getSelectedChannelId: async (): Promise<string | null> => {
+        assert.equal(membershipSweepCompleted, true);
+        return "CSERIAL";
+      },
+    };
+    const serializedSlack = {
+      botIdentity: async () => ({ userId: "UBOT", teamId: "TSERIAL" }),
+      listBotChannels: async (): Promise<string[]> => {
+        await sleep(10);
+        membershipSweepCompleted = true;
+        return ["CSERIAL"];
+      },
+    };
+    assert.equal(
+      (
+        await resolveChannel(
+          serializedStore as never,
+          serializedSlack as never as SlackClient,
+        )
+      ).channelId,
+      "CSERIAL",
+    );
+
     const slack = makeSlackStub({ teamId: "TROUTE", channels: [] });
     const slackClient = slack as never as SlackClient;
 
@@ -931,7 +956,7 @@ try {
     // One unambiguous live membership repairs a missed first-join event.
     slack.channels = ["CA"];
     assert.equal((await resolveChannel(store, slackClient)).channelId, "CA");
-    assert.equal((await store.getTeamChannelRoute("TROUTE"))?.selectedChannelId, "CA");
+    assert.equal(await store.getSelectedChannelId("TROUTE"), "CA");
 
     // Additional memberships never change the explicit route.
     slack.channels = ["CA", "CB"];
@@ -975,7 +1000,7 @@ try {
       (err: unknown) =>
         err instanceof ChannelResolutionError && err.message === SLACK_MULTIPLE_CHANNELS_MESSAGE,
     );
-    assert.equal(await store.getTeamChannelRoute("TAMBIG"), null);
+    assert.equal(await store.getSelectedChannelId("TAMBIG"), null);
 
     // Concurrent first joins serialize; exactly one initializes the route.
     const initializations = await Promise.all([
@@ -983,6 +1008,17 @@ try {
       store.initializeTeamChannelRoute({ teamId: "TRACEINIT", channelId: "C2" }),
     ]);
     assert.equal(initializations.filter((result) => result.initializedRoute).length, 1);
+  }
+
+  // --- Start onboarding is read-only; video owns missed-event initialization ---
+  {
+    const slack = makeSlackStub({ teamId: "TSTARTREAD", channels: ["CSTARTREAD"] });
+    const app = makeApp(makeGithubStub(), slack);
+    const start = (await startRun(app, makeStart(19, { headSha: "startread01" }))).body;
+    assert.equal(start.onboarded, true);
+    assert.equal(await store.getSelectedChannelId("TSTARTREAD"), null);
+    assert.equal((await postVideo(app, start.cycleId!, start.attemptId)).res.statusCode, 200);
+    assert.equal(await store.getSelectedChannelId("TSTARTREAD"), "CSTARTREAD");
   }
 
   // --- Shared tenant channel: repos share the active channel; mention default ---
@@ -1088,13 +1124,30 @@ try {
       event_id: "Ev0FIRSTJOIN",
     };
     slack.channels = ["CE1"];
+    const listBotChannels = slack.listBotChannels;
+    const getSelectedChannelId = store.getSelectedChannelId.bind(store);
+    let membershipSweepCompleted = false;
+    let greetingRouteReadAfterMembership: boolean | undefined;
+    slack.listBotChannels = async () => {
+      await sleep(10);
+      membershipSweepCompleted = true;
+      return listBotChannels();
+    };
+    store.getSelectedChannelId = async (teamId: string) => {
+      if (teamId === "TEVT") greetingRouteReadAfterMembership = membershipSweepCompleted;
+      return getSelectedChannelId(teamId);
+    };
     await postSlackEvent(app, firstJoin);
+    assert.ok(await waitFor(async () => greetingRouteReadAfterMembership !== undefined));
+    assert.equal(greetingRouteReadAfterMembership, true);
     assert.ok(await waitFor(async () => slack.postMessageCalls.length === 1));
+    slack.listBotChannels = listBotChannels;
+    store.getSelectedChannelId = getSelectedChannelId;
     assert.deepEqual(slack.postMessageCalls[0], {
       channel: "CE1",
       text: SLACK_GREETING_ACTIVE,
     });
-    assert.equal((await store.getTeamChannelRoute("TEVT"))?.selectedChannelId, "CE1");
+    assert.equal(await store.getSelectedChannelId("TEVT"), "CE1");
 
     // A retried first join and every later join are silent.
     await postSlackEvent(app, firstJoin);
@@ -1138,7 +1191,7 @@ try {
     );
     await sleep(150);
     assert.equal(slack.postMessageCalls.length, 1);
-    assert.equal((await store.getTeamChannelRoute("TEVT"))?.selectedChannelId, "CE1");
+    assert.equal(await store.getSelectedChannelId("TEVT"), "CE1");
 
     // Runtime events never write legacy membership rows.
     const probe = new Client({ connectionString: testUrl });
@@ -1151,7 +1204,7 @@ try {
     assert.equal(legacyRows.rows[0].count, "0");
   }
 
-  // --- Commands: mention set/off/echo/bad-handle, approvers, status, usage ---
+  // --- Commands: mention set/echo/bad-handle, approvers, status, usage ---
   {
     const slack = makeSlackStub({ teamId: "TCMD", channels: ["CCMD"] });
     slack.usergroups = [{ id: "S777", handle: "product-team" }];
@@ -1185,6 +1238,10 @@ try {
       return { res, body: { response_type: "ephemeral", text: message?.text } };
     };
 
+    assert.equal(
+      (await run("status")).body.text,
+      "Feature-Rec is already present in <#CCMD>, but no review channel is selected. Run `/feature-rec channel #channel-name` to select it.",
+    );
     assert.equal(
       (await run("channel <#CCMD|reviews>")).body.text,
       "Feature-Rec videos will now be sent to <#CCMD>. Existing mention and approver settings for that channel are unchanged.",
@@ -1228,7 +1285,7 @@ try {
       approvers: ["U111"],
     });
     await run("channel <#GPRIVATE|private>", "D123", "TCMD", "UANYONE");
-    assert.equal((await store.getTeamChannelRoute("TCMD"))?.selectedChannelId, "GPRIVATE");
+    assert.equal(await store.getSelectedChannelId("TCMD"), "GPRIVATE");
     await run("channel <#CCMD|reviews>", "D123", "TCMD", "UANYONE");
     assert.equal(slack.postMessageCalls.length, 0);
     assert.equal(
@@ -1276,16 +1333,17 @@ try {
       "Validation requests in <#CCMD> will mention <!here>.",
     );
     assert.equal((await store.getChannelSettings("TCMD", "CCMD"))?.mention, "<!here>");
-    assert.equal(
-      (await run("mention @here off")).body.text,
-      'Use "off" by itself: `/feature-rec mention off`.',
-    );
+    assert.ok((await run("mention off")).body.text?.startsWith("Unknown mention target off."));
     assert.equal((await store.getChannelSettings("TCMD", "CCMD"))?.mention, "<!here>");
 
-    assert.equal(
-      (await run("mention off")).body.text,
-      "Mention turned off for validation requests in <#CCMD>.",
-    );
+    // Existing empty mention settings remain readable and can be overwritten,
+    // but the command no longer creates them.
+    await store.setMention({
+      teamId: "TCMD",
+      channelId: "CCMD",
+      mention: "",
+      updatedBy: "ULEGACY",
+    });
     assert.equal((await store.getChannelSettings("TCMD", "CCMD"))?.mention, "");
     assert.equal((await run("mention")).body.text, "Mention for <#CCMD>: off");
 
@@ -1302,31 +1360,28 @@ try {
       "U111",
     ]);
     assert.ok((await run("approvers @nobody")).body.text?.startsWith("Unknown approver @nobody."));
-    slack.usergroups.push(
-      { id: "SDISABLED", handle: "disabled-team", disabled: true },
-      { id: "SEMPTY", handle: "empty-team" },
-    );
-    assert.equal(
-      (await run("approvers @disabled-team")).body.text,
-      "Usergroup @disabled-team is disabled and cannot be selected.",
-    );
+    slack.usergroups.push({ id: "SEMPTY", handle: "empty-team" });
     assert.equal(
       (await run("approvers @empty-team")).body.text,
       "Usergroup @empty-team has no users and cannot be selected.",
     );
     assert.equal(
-      (await run("approvers everyone <@U111|bob>")).body.text,
-      'Use "everyone" by itself: `/feature-rec approvers everyone`.',
+      (await run("approvers @channel <@U111|bob>")).body.text,
+      "Use @channel by itself: `/feature-rec approvers @channel`.",
     );
     assert.deepEqual((await store.getChannelSettings("TCMD", "CCMD"))?.approvers, [
       "S777",
       "U111",
     ]);
     assert.equal(
-      (await run("approvers everyone")).body.text,
+      (await run("approvers <!channel>")).body.text,
       "Everyone in <#CCMD> can now approve.",
     );
     assert.equal((await store.getChannelSettings("TCMD", "CCMD"))?.approvers, null);
+    assert.ok(
+      (await run("approvers everyone")).body.text?.startsWith("Unknown approver everyone."),
+    );
+    assert.ok((await run("approvers off")).body.text?.startsWith("Unknown approver off."));
 
     slack.channels = ["CCMD", "CCMD2"];
     const status = (await run("status")).body.text ?? "";
@@ -1615,6 +1670,28 @@ try {
     ]);
   }
 
+  // --- Real SlackClient.listUsergroups: disabled groups are excluded upstream ---
+  {
+    const previousFetch = globalThis.fetch;
+    let requestBody: { include_disabled?: boolean } | undefined;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      requestBody = JSON.parse(String(init?.body)) as { include_disabled?: boolean };
+      return new Response(
+        JSON.stringify({ ok: true, usergroups: [{ id: "SENABLED", handle: "enabled" }] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+    try {
+      const client = new SlackClient({ ...env, slackBotToken: "xoxb-test" });
+      assert.deepEqual(await client.listUsergroups(), [
+        { id: "SENABLED", handle: "enabled" },
+      ]);
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+    assert.deepEqual(requestBody, { include_disabled: false });
+  }
+
   // --- Real SlackClient.isApprover: direct ids skip the API, groups expand ---
   {
     const previousFetch = globalThis.fetch;
@@ -1702,7 +1779,7 @@ try {
     });
     assert.equal(first.initializedRoute, true);
     assert.equal(second.initializedRoute, false);
-    assert.equal((await store.getTeamChannelRoute("TSTORE"))?.selectedChannelId, "CSTORE1");
+    assert.equal(await store.getSelectedChannelId("TSTORE"), "CSTORE1");
     assert.equal(await store.getChannelSettings("TSTORE", "CSTORE1"), null);
 
     await store.setMention({
@@ -1721,8 +1798,8 @@ try {
       store.selectTeamChannel({ teamId: "TSTORE", channelId: "CSTORE2" }),
       store.selectTeamChannel({ teamId: "TSTORE", channelId: "CSTORE3" }),
     ]);
-    const route = await store.getTeamChannelRoute("TSTORE");
-    assert.ok(route?.selectedChannelId === "CSTORE2" || route?.selectedChannelId === "CSTORE3");
+    const selectedChannelId = await store.getSelectedChannelId("TSTORE");
+    assert.ok(selectedChannelId === "CSTORE2" || selectedChannelId === "CSTORE3");
     assert.deepEqual(await store.getChannelSettings("TSTORE", "CSTORE2"), {
       mention: "<!channel>",
       approvers: ["U2"],
@@ -1733,7 +1810,7 @@ try {
       channelId: "COTHER",
     });
     assert.equal(
-      (await store.getTeamChannelRoute("TSTORE-OTHER"))?.selectedChannelId,
+      await store.getSelectedChannelId("TSTORE-OTHER"),
       "COTHER",
     );
   }
