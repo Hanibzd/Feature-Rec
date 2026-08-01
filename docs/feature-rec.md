@@ -196,7 +196,6 @@ Create a Slack App with bot scopes:
 
 - `chat:write` — post validation messages and the first-channel greeting
 - `files:write` — upload the demo video
-- `views:write` — open the request-changes modal
 - `usergroups:read` — resolve usergroup handles and expand approver groups
 - `channels:read` — list the bot's public-channel memberships (routing)
 - `groups:read` — same for private channels
@@ -205,7 +204,10 @@ Create a Slack App with bot scopes:
 
 `channels:read` and `groups:read` also cover the `conversations.members` checks used
 when changing mentions or approvers, so explicit channel selection adds no OAuth
-scope and does not require reinstalling an already configured app.
+scope and does not require reinstalling an already configured app. `im:read` and
+`mpim:read` are not required because routing requests only `public_channel` and
+`private_channel`; slash-command replies from DMs use their `response_url` instead
+of reading the conversation. Slack's `views.open` method requires no OAuth scope.
 
 Configure, replacing `<host>` with the public backend origin (or the ngrok host locally):
 
