@@ -3,7 +3,14 @@ import type { SlackApprovalPayload } from "@feature-rec/core";
 import type { ServiceEnv } from "./env";
 import type { CycleRecord } from "./storage";
 
-type SlackResponse<T> = T & { ok: boolean; error?: string };
+type SlackResponse<T> = T & {
+  ok: boolean;
+  error?: string;
+  response_metadata?: {
+    messages?: string[];
+    next_cursor?: string;
+  };
+};
 
 export type BotIdentity = {
   userId: string;
@@ -38,8 +45,31 @@ async function slackApi<T>(
     },
     body: JSON.stringify(body),
   });
+  return readSlackResponse<T>(method, response);
+}
+
+async function slackApiGet<T>(
+  env: ServiceEnv,
+  method: string,
+  query: Record<string, string | number>,
+): Promise<T> {
+  if (!env.slackBotToken) throw new Error("SLACK_BOT_TOKEN is not set.");
+  const url = new URL(`https://slack.com/api/${method}`);
+  Object.entries(query).forEach(([key, value]) => url.searchParams.set(key, String(value)));
+  const response = await fetch(url, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${env.slackBotToken}` },
+  });
+  return readSlackResponse<T>(method, response);
+}
+
+async function readSlackResponse<T>(method: string, response: Response): Promise<T> {
   const json = (await response.json()) as SlackResponse<T>;
-  if (!json.ok) throw new Error(`Slack ${method} failed: ${json.error ?? response.statusText}`);
+  if (!json.ok) {
+    const details = json.response_metadata?.messages?.filter(Boolean).join("; ");
+    const reason = json.error ?? response.statusText;
+    throw new Error(`Slack ${method} failed: ${reason}${details ? ` (${details})` : ""}`);
+  }
   return json as T;
 }
 
@@ -176,7 +206,7 @@ export class SlackClient {
     const members: string[] = [];
     let cursor: string | undefined;
     do {
-      const page = await slackApi<ConversationMembersPage>(
+      const page = await slackApiGet<ConversationMembersPage>(
         this.#env,
         "conversations.members",
         {
