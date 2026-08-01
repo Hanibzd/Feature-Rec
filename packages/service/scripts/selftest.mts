@@ -955,12 +955,16 @@ try {
 
     // One unambiguous live membership repairs a missed first-join event.
     slack.channels = ["CA"];
-    assert.equal((await resolveChannel(store, slackClient)).channelId, "CA");
+    const repaired = await resolveChannel(store, slackClient);
+    assert.equal(repaired.channelId, "CA");
+    assert.equal(repaired.initializedRoute, true);
     assert.equal(await store.getSelectedChannelId("TROUTE"), "CA");
 
     // Additional memberships never change the explicit route.
     slack.channels = ["CA", "CB"];
-    assert.equal((await resolveChannel(store, slackClient)).channelId, "CA");
+    const existing = await resolveChannel(store, slackClient);
+    assert.equal(existing.channelId, "CA");
+    assert.equal(existing.initializedRoute, false);
 
     // Removing the selected channel does not fail over to another membership.
     slack.channels = ["CB"];
@@ -1019,6 +1023,24 @@ try {
     assert.equal(await store.getSelectedChannelId("TSTARTREAD"), null);
     assert.equal((await postVideo(app, start.cycleId!, start.attemptId)).res.statusCode, 200);
     assert.equal(await store.getSelectedChannelId("TSTARTREAD"), "CSTARTREAD");
+    assert.deepEqual(slack.postMessageCalls, [
+      { channel: "CSTARTREAD", text: SLACK_GREETING_ACTIVE },
+    ]);
+
+    // A delayed join event loses route initialization and does not duplicate
+    // the greeting emitted by the missed-event fallback.
+    await postSlackEvent(
+      app,
+      membershipEvent({
+        type: "member_joined_channel",
+        teamId: "TSTARTREAD",
+        user: "UBOT",
+        channel: "CSTARTREAD",
+        ts: "1767225600.000000",
+      }),
+    );
+    await sleep(50);
+    assert.equal(slack.postMessageCalls.length, 1);
   }
 
   // --- Shared tenant channel: repos share the active channel; mention default ---

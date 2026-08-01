@@ -422,6 +422,7 @@ export function buildServer(input: {
       let resolved: {
         teamId: string;
         channelId: string;
+        initializedRoute: boolean;
       };
       try {
         resolved = await resolveChannel(store, slack);
@@ -448,6 +449,14 @@ export function buildServer(input: {
         return reply
           .code(422)
           .send({ ok: false, error: "no_slack_channel", message: err.message, settled: true });
+      }
+      if (resolved.initializedRoute) {
+        await greetJoinedChannel(resolved.teamId, resolved.channelId).catch((err: unknown) => {
+          request.log.warn(
+            { err, teamId: resolved.teamId, channelId: resolved.channelId },
+            "missed-event fallback greeting failed",
+          );
+        });
       }
       await withRetry(() =>
         github.updateCheckRun(cycle, {

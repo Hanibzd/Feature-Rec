@@ -13,7 +13,7 @@ export class ChannelResolutionError extends Error {}
 export async function resolveChannel(
   store: CycleStore,
   slack: SlackClient,
-): Promise<{ teamId: string; channelId: string }> {
+): Promise<{ teamId: string; channelId: string; initializedRoute: boolean }> {
   const { teamId } = await slack.botIdentity();
   const channelIds = await slack.listBotChannels();
   const selectedChannelId = await store.getSelectedChannelId(teamId);
@@ -24,7 +24,7 @@ export async function resolveChannel(
         slackSelectedChannelUnavailableMessage(selectedChannelId),
       );
     }
-    return { teamId, channelId: selectedChannelId };
+    return { teamId, channelId: selectedChannelId, initializedRoute: false };
   }
 
   if (channelIds.length === 0) throw new ChannelResolutionError(SLACK_NO_CHANNEL_MESSAGE);
@@ -34,13 +34,13 @@ export async function resolveChannel(
 
   const channelId = channelIds[0];
   const initialized = await store.initializeTeamChannelRoute({ teamId, channelId });
-  if (initialized.initializedRoute) return { teamId, channelId };
+  if (initialized.initializedRoute) return { teamId, channelId, initializedRoute: true };
 
   // A join event or command won the initialization race. Honor that route,
   // provided it is still represented by the resolver's membership snapshot.
   const currentChannelId = await store.getSelectedChannelId(teamId);
   if (currentChannelId && channelIds.includes(currentChannelId)) {
-    return { teamId, channelId: currentChannelId };
+    return { teamId, channelId: currentChannelId, initializedRoute: false };
   }
   throw new ChannelResolutionError(
     currentChannelId

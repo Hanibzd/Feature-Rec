@@ -200,8 +200,11 @@ never copied into Postgres.
 becomes usable again when live Slack calls see the bot there.
 - As resilience for a missed first join event, a delivery that finds no route may
 poll Slack and initialize automatically only when the bot belongs to exactly one
-channel. If several memberships exist, it must not guess which was first; return
-an actionable error asking a user to run `/feature-rec channel #channel`.
+channel. When delivery wins initialization, recheck the selected route and live
+membership, then emit the same active greeting before continuing. Greeting failure
+is logged but does not block video delivery. If several memberships exist, it must
+not guess which was first; return an actionable error asking a user to run
+`/feature-rec channel #channel`.
 
 The `/start` onboarding probe is read-only. It reports a usable selected route as
 onboarded and also reports a sole membership as onboarded because `/video` can use
@@ -492,6 +495,8 @@ and HTTP 422.
 - A mid-cycle switch is observed at video-post time.
 - The `/start` onboarding probe recognizes a sole membership without writing a
   route; `/video` subsequently initializes the missed-event fallback.
+- When `/video` wins fallback initialization, it emits one active greeting; a
+  delayed join event does not emit a duplicate.
 - Route reads occur after membership polls, so switches committed during the poll
   are observed.
 

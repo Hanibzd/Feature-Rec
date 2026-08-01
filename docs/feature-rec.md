@@ -40,10 +40,10 @@ channels**: validation videos and PR information will be posted there, visible t
 organization. Every message identifies its repo as `owner/repo#N`.
 
 If there is no saved route and exactly one live membership, delivery repairs a missed first-join
-event by selecting it. With several memberships it refuses to guess and asks a user to run the
-channel command. If the selected channel is unavailable when a validation is ready, no Slack
-message is posted and the Check Run fails with instructions to re-invite the bot or select another
-channel.
+event by selecting it and emits the same active greeting after rechecking the live route. With
+several memberships it refuses to guess and asks a user to run the channel command. If the selected
+channel is unavailable when a validation is ready, no Slack message is posted and the Check Run
+fails with instructions to re-invite the bot or select another channel.
 
 ## Slash Commands
 
