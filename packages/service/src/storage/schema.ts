@@ -29,19 +29,6 @@ export interface ProcessedInteractionsTable {
   created_at: string;
 }
 
-// timestamptz selects come back as Date from `pg`; writes accept ISO strings.
-export interface BotChannelsTable {
-  team_id: string;
-  channel_id: string;
-  joined_at: ColumnType<Date | null, string | null | undefined, string | null>;
-  first_seen_at: ColumnType<Date, string, string>;
-  last_seen_at: ColumnType<Date, string, string>;
-  left_at: ColumnType<Date | null, string | null | undefined, string | null>;
-  // Retained after left_at is cleared so delayed joins can be assigned to the
-  // correct membership generation.
-  last_left_at: ColumnType<Date | null, string | null | undefined, string | null>;
-}
-
 export interface ChannelSettingsTable {
   team_id: string;
   channel_id: string;
@@ -59,7 +46,6 @@ export interface TeamChannelRoutesTable {
 export interface DB {
   review_cycles: ReviewCyclesTable;
   processed_interactions: ProcessedInteractionsTable;
-  bot_channels: BotChannelsTable;
   channel_settings: ChannelSettingsTable;
   team_channel_routes: TeamChannelRoutesTable;
 }

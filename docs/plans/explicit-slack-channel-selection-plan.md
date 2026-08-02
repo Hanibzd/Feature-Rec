@@ -137,9 +137,9 @@ Teams with no active membership get no route row. Their next observed first
 membership is initialized normally.
 
 The down migration only drops `team_channel_routes`. Existing per-channel settings
-remain active in both the new and rollback designs. After backfill, the new runtime
-stops writing `bot_channels`; remove only that legacy membership table through the
-post-deployment cleanup phase below, after the rollback window closes.
+remain active. The new runtime stops writing `bot_channels`; migration `0006` in the
+post-deployment cleanup phase below removes that legacy table after the rollback
+window closes.
 
 ## Store and concurrency changes
 
@@ -646,16 +646,15 @@ not deployed between them.
   `selected_channel_unavailable` so rollout problems are distinguishable from
    incomplete onboarding.
 
-Rollback is schema-safe: the old service ignores `team_channel_routes` and resumes
-oldest-active routing. It will also resume queue greetings and promotion notices,
-but it continues reading the same per-channel settings used by the new service.
-Rollback therefore changes routing behavior without requiring settings recovery.
+The additive rollout initially remained schema-safe for the previous queue-based
+service. Migration `0006` ends that compatibility window: after cleanup, rollback is
+limited to explicit-route binaries. Recovering the legacy membership snapshot
+requires restoring the pre-cleanup database backup.
 
 ## Post-deployment cleanup
 
-Perform cleanup in a separate follow-up PR and deployment. Do not combine it with
-the feature rollout: `bot_channels` is the only routing state an old binary
-understands, so keeping it temporarily is what makes a code rollback possible.
+Migration `0006_drop_legacy_bot_channels` implements this separate follow-up
+cleanup. It must be deployed only after the preconditions below are complete.
 `channel_settings` remains a live production table and is not part of cleanup.
 
 ### Preconditions
@@ -678,8 +677,7 @@ Before creating the destructive cleanup migration:
 
 ### Cleanup migration
 
-Add and register a forward migration such as
-`0006_drop_legacy_bot_channels.ts`:
+The registered forward migration `0006_drop_legacy_bot_channels.ts` performs:
 
 ```sql
 drop table bot_channels;

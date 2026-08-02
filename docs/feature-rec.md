@@ -45,6 +45,11 @@ several memberships it refuses to guess and asks a user to run the channel comma
 channel is unavailable when a validation is ready, no Slack message is posted and the Check Run
 fails with instructions to re-invite the bot or select another channel.
 
+`team_channel_routes` is the persistent routing source of truth, with one selected channel per Slack
+workspace. `channel_settings` is the source of truth for each channel's mention and approver
+configuration. Bot membership is read live from Slack for selection and availability checks; it is
+not persisted locally.
+
 ## Slash Commands
 
 `/feature-rec` can be run from any conversation or DM in the installed workspace; every reply is
@@ -159,6 +164,13 @@ policy, then perform at least one `pg_dump`/`pg_restore` drill before the state 
 Application rollback redeploys the previous healthy image; schema migrations must remain backward
 compatible because automatic down migrations are not used.
 
+Migration `0006_drop_legacy_bot_channels` permanently removes the obsolete membership snapshot after
+explicit routing has completed its observation window. Before deploying it, verify every expected
+workspace has a `team_channel_routes` row and retain a database snapshot or `bot_channels` export.
+After it runs, rollback is limited to explicit-route service versions; queue-based binaries are no
+longer supported. Restoring membership history requires the pre-cleanup snapshot, not a down
+migration.
+
 Moving to another provider requires no application changes: restore the PostgreSQL backup, configure
 the same environment variables, deploy the same OCI image, wait for migrations and `/health`, test
 GitHub and Slack against a staging hostname, and then switch DNS. A custom domain keeps integration
@@ -196,7 +208,6 @@ Create a Slack App with bot scopes:
 
 - `chat:write` — post validation messages and the first-channel greeting
 - `files:write` — upload the demo video
-- `views:write` — open the request-changes modal
 - `usergroups:read` — resolve usergroup handles and expand approver groups
 - `channels:read` — list the bot's public-channel memberships (routing)
 - `groups:read` — same for private channels
@@ -205,7 +216,10 @@ Create a Slack App with bot scopes:
 
 `channels:read` and `groups:read` also cover the `conversations.members` checks used
 when changing mentions or approvers, so explicit channel selection adds no OAuth
-scope and does not require reinstalling an already configured app.
+scope and does not require reinstalling an already configured app. `im:read` and
+`mpim:read` are not required because routing requests only `public_channel` and
+`private_channel`; slash-command replies from DMs use their `response_url` instead
+of reading the conversation. Slack's `views.open` method requires no OAuth scope.
 
 Configure, replacing `<host>` with the public backend origin (or the ngrok host locally):
 
