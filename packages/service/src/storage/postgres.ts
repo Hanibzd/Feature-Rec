@@ -5,11 +5,24 @@ import { Migrator } from "kysely/migration";
 import { Pool } from "pg";
 import { z } from "zod";
 import type { ReviewCycleStatus, RunStartRequest } from "@feature-rec/core";
-import type { ChannelSettings, CycleRecord, CycleStore, StartCycleResult } from "../storage";
+import {
+  DEFAULT_CHANNEL_SETTINGS,
+  type ChannelSettings,
+  type CycleRecord,
+  type CycleStore,
+  type MentionSetting,
+  type StartCycleResult,
+} from "../storage";
 import type { DB, ReviewCyclesTable } from "./schema";
 import { migrationProvider } from "./migrations";
 
 const ApproverIdsSchema = z.array(z.string());
+const MentionModeSchema = z.enum(["approvers", "custom", "off"]);
+
+type ChannelSettingsColumns = {
+  mention?: MentionSetting;
+  approvers?: string | null;
+};
 
 function now(): string {
   return new Date().toISOString();
@@ -275,14 +288,19 @@ export class PostgresCycleStore implements CycleStore {
     });
   }
 
-  async getChannelSettings(teamId: string, channelId: string): Promise<ChannelSettings | null> {
+  async getChannelSettings(teamId: string, channelId: string): Promise<ChannelSettings> {
     const row = await this.#db
       .selectFrom("channel_settings")
       .selectAll()
       .where("team_id", "=", teamId)
       .where("channel_id", "=", channelId)
       .executeTakeFirst();
-    if (!row) return null;
+    if (!row) {
+      return {
+        mention: { ...DEFAULT_CHANNEL_SETTINGS.mention },
+        approvers: DEFAULT_CHANNEL_SETTINGS.approvers,
+      };
+    }
     let approvers: string[] | null = null;
     if (row.approvers !== null) {
       try {
@@ -293,7 +311,28 @@ export class PostgresCycleStore implements CycleStore {
         );
       }
     }
-    return { mention: row.mention, approvers };
+    const parsedMode = MentionModeSchema.safeParse(row.mention_mode);
+    if (!parsedMode.success) {
+      throw new Error(
+        `channel_settings.mention_mode for ${teamId}/${channelId} is invalid: ${row.mention_mode}`,
+      );
+    }
+    let mention: MentionSetting;
+    if (parsedMode.data === "custom") {
+      if (row.mention_audience === null || row.mention_audience === "") {
+        throw new Error(
+          `channel_settings.mention_audience for ${teamId}/${channelId} is missing for custom mode`,
+        );
+      }
+      mention = { mode: "custom", audience: row.mention_audience };
+    } else if (row.mention_audience !== null) {
+      throw new Error(
+        `channel_settings.mention_audience for ${teamId}/${channelId} must be null in ${parsedMode.data} mode`,
+      );
+    } else {
+      mention = { mode: parsedMode.data };
+    }
+    return { mention, approvers };
   }
 
   async #upsertChannelSettings(
@@ -301,24 +340,33 @@ export class PostgresCycleStore implements CycleStore {
       teamId: string;
       channelId: string;
       updatedBy: string;
-      set: { mention?: string; approvers?: string | null };
+      set: ChannelSettingsColumns;
     },
     db: Kysely<DB> | Transaction<DB> = this.#db,
   ): Promise<void> {
     const t = now();
+    const mention = input.set.mention ?? DEFAULT_CHANNEL_SETTINGS.mention;
+    const mention_mode = mention.mode;
+    const mention_audience = mention.mode === "custom" ? mention.audience : null;
     await db
       .insertInto("channel_settings")
       .values({
         team_id: input.teamId,
         channel_id: input.channelId,
-        mention: input.set.mention ?? null,
+        mention_mode,
+        mention_audience,
         approvers: input.set.approvers ?? null,
         updated_by: input.updatedBy,
         updated_at: t,
       })
       .onConflict((oc) =>
         oc.columns(["team_id", "channel_id"]).doUpdateSet({
-          ...(input.set.mention === undefined ? {} : { mention: input.set.mention }),
+          ...(input.set.mention === undefined
+            ? {}
+            : {
+                mention_mode,
+                mention_audience,
+              }),
           ...(input.set.approvers === undefined ? {} : { approvers: input.set.approvers }),
           updated_by: input.updatedBy,
           updated_at: t,
@@ -327,24 +375,10 @@ export class PostgresCycleStore implements CycleStore {
       .execute();
   }
 
-  async setMention(input: {
-    teamId: string;
-    channelId: string;
-    mention: string;
-    updatedBy: string;
-  }): Promise<void> {
-    await this.#upsertChannelSettings({
-      teamId: input.teamId,
-      channelId: input.channelId,
-      updatedBy: input.updatedBy,
-      set: { mention: input.mention },
-    });
-  }
-
-  async setSelectedChannelMention(input: {
+  async setSelectedChannelMentionSetting(input: {
     teamId: string;
     expectedChannelId: string;
-    mention: string;
+    mention: MentionSetting;
     updatedBy: string;
   }): Promise<boolean> {
     return this.#updateSelectedChannelSettings({
@@ -355,28 +389,13 @@ export class PostgresCycleStore implements CycleStore {
     });
   }
 
-  async setApprovers(input: {
-    teamId: string;
-    channelId: string;
-    approvers: string[] | null;
-    updatedBy: string;
-  }): Promise<void> {
-    // An empty list means "everyone", same as null — store the canonical form.
-    const approvers = input.approvers?.length ? JSON.stringify(input.approvers) : null;
-    await this.#upsertChannelSettings({
-      teamId: input.teamId,
-      channelId: input.channelId,
-      updatedBy: input.updatedBy,
-      set: { approvers },
-    });
-  }
-
   async setSelectedChannelApprovers(input: {
     teamId: string;
     expectedChannelId: string;
     approvers: string[] | null;
     updatedBy: string;
   }): Promise<boolean> {
+    // An empty list means "everyone", same as null — store the canonical form.
     const approvers = input.approvers?.length ? JSON.stringify(input.approvers) : null;
     return this.#updateSelectedChannelSettings({
       teamId: input.teamId,
@@ -390,7 +409,7 @@ export class PostgresCycleStore implements CycleStore {
     teamId: string;
     expectedChannelId: string;
     updatedBy: string;
-    set: { mention?: string; approvers?: string | null };
+    set: ChannelSettingsColumns;
   }): Promise<boolean> {
     return this.#db.transaction().execute(async (trx) => {
       const lockKey = `team-route:${input.teamId}`;

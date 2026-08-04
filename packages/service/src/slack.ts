@@ -97,13 +97,14 @@ function actionValue(payload: SlackApprovalPayload): string {
 
 function validationBlocks(cycle: CycleRecord, mention: string | null): unknown[] {
   const title = `Feature-Rec validation needed for ${cycle.owner}/${cycle.repo}#${cycle.prNumber}`;
-  const prefix = mention ?? "<!here>";
+  const body = `*${title}*\n${cycle.prTitle || "Frontend-visible change detected."}`;
   return [
     {
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `${prefix ? `${prefix}\n` : ""}*${title}*\n${cycle.prTitle || "Frontend-visible change detected."}`,
+        // Caller resolves the effective mention; null means no mention prefix.
+        text: mention ? `${mention}\n${body}` : body,
       },
     },
     {
