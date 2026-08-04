@@ -39,14 +39,16 @@ export function effectiveMention(settings: ChannelSettings): string | null {
   }
 }
 
-function describeApproversLine(settings: ChannelSettings): string {
+/** The `Approvers:` status row on its own, for the approvers command helper. */
+export function describeApproversLine(settings: ChannelSettings): string {
   if (settings.approvers?.length) {
     return `Approvers: ${formatApproverList(settings.approvers)}`;
   }
   return "Approvers: anyone in the channel";
 }
 
-function describeNotificationsLine(settings: ChannelSettings): string {
+/** The `Notifications:` status row on its own, for the mention command helper. */
+export function describeNotificationsLine(settings: ChannelSettings): string {
   switch (settings.mention.mode) {
     case "off":
       return "Notifications: off";
