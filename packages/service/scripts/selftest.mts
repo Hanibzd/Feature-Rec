@@ -411,7 +411,7 @@ const store = new PostgresCycleStore(testUrl);
 await store.init();
 
 try {
-  // --- Migration 0005 backfills routes; 0006 drops only legacy memberships ---
+  // --- Migration 0005–0007: routes, drop memberships, mention modes ---
   {
     const migrationDbName = `${dbName}_migration`;
     const migrationAdmin = new Client({ connectionString: adminUrl });
@@ -441,20 +441,20 @@ try {
           ('TBACKFILL', 'CLEFT',   '2025-12-01', '2025-12-01', '2025-12-01', '2026-01-03'),
           ('TLEFTONLY', 'CGONE',  '2026-01-01', '2026-01-01', '2026-01-01', '2026-01-02')
       `);
+      // Legacy mention shapes: null, empty, @here, @channel, and custom all reset
+      // to follow-approvers. Approver JSON is preserved.
       await seed.query(`
         insert into channel_settings
           (team_id, channel_id, mention, approvers, updated_by, updated_at)
         values
           ('TBACKFILL', 'COLDEST', '<!here>', '["U1"]', 'U1', now()),
-          ('TBACKFILL', 'CNEWER',  '', null, 'U2', now())
+          ('TBACKFILL', 'CNEWER',  '', null, 'U2', now()),
+          ('TBACKFILL', 'CLEFT',   '<!channel>', '["U9"]', 'U3', now()),
+          ('TLEFTONLY', 'CGONE',   '<@U42>', null, 'U4', now()),
+          ('TNULLMENTION', 'CNULL', null, '["U5"]', 'U5', now())
       `);
       await seed.end();
 
-      const settingsBeforeCleanup = await migrationDb
-        .selectFrom("channel_settings")
-        .selectAll()
-        .orderBy("channel_id")
-        .execute();
       const legacyTableName = async (): Promise<string | null> =>
         sql<{ relation: string | null }>`
           select to_regclass('public.bot_channels')::text as relation
@@ -468,19 +468,142 @@ try {
       assert.deepEqual(routes, [
         { team_id: "TBACKFILL", selected_channel_id: "COLDEST" },
       ]);
-      assert.deepEqual(
-        await migrationDb
-          .selectFrom("channel_settings")
-          .selectAll()
-          .orderBy("channel_id")
-          .execute(),
-        settingsBeforeCleanup,
-      );
+      const migratedSettings = await migrationDb
+        .selectFrom("channel_settings")
+        .select(["team_id", "channel_id", "mention_mode", "mention_audience", "approvers"])
+        .orderBy("team_id")
+        .orderBy("channel_id")
+        .execute();
+      assert.deepEqual(migratedSettings, [
+        {
+          team_id: "TBACKFILL",
+          channel_id: "CLEFT",
+          mention_mode: "approvers",
+          mention_audience: null,
+          approvers: '["U9"]',
+        },
+        {
+          team_id: "TBACKFILL",
+          channel_id: "CNEWER",
+          mention_mode: "approvers",
+          mention_audience: null,
+          approvers: null,
+        },
+        {
+          team_id: "TBACKFILL",
+          channel_id: "COLDEST",
+          mention_mode: "approvers",
+          mention_audience: null,
+          approvers: '["U1"]',
+        },
+        {
+          team_id: "TLEFTONLY",
+          channel_id: "CGONE",
+          mention_mode: "approvers",
+          mention_audience: null,
+          approvers: null,
+        },
+        {
+          team_id: "TNULLMENTION",
+          channel_id: "CNULL",
+          mention_mode: "approvers",
+          mention_audience: null,
+          approvers: '["U5"]',
+        },
+      ]);
       assert.equal(await legacyTableName(), null);
 
-      // Down recreates only the empty legacy shape; it cannot restore history.
-      const down = await migrator.migrateDown();
-      if (down.error) throw down.error;
+      // Constraint coverage for the new mention-mode shape.
+      const constraintClient = new Client({ connectionString: migrationUrl });
+      await constraintClient.connect();
+      // Unknown modes also fail the audience check (evaluated first by name);
+      // either constraint rejection is enough to prove invalid modes are blocked.
+      await assert.rejects(
+        () =>
+          constraintClient.query(`
+            insert into channel_settings
+              (team_id, channel_id, mention_mode, mention_audience, approvers, updated_by, updated_at)
+            values ('TBAD', 'CBAD', 'unknown', null, null, 'U1', now())
+          `),
+        /violates check constraint/,
+      );
+      await assert.rejects(
+        () =>
+          constraintClient.query(`
+            insert into channel_settings
+              (team_id, channel_id, mention_mode, mention_audience, approvers, updated_by, updated_at)
+            values ('TBAD', 'CBAD', 'custom', null, null, 'U1', now())
+          `),
+        /channel_settings_mention_audience_check/,
+      );
+      await assert.rejects(
+        () =>
+          constraintClient.query(`
+            insert into channel_settings
+              (team_id, channel_id, mention_mode, mention_audience, approvers, updated_by, updated_at)
+            values ('TBAD', 'CBAD', 'custom', '', null, 'U1', now())
+          `),
+        /channel_settings_mention_audience_check/,
+      );
+      await assert.rejects(
+        () =>
+          constraintClient.query(`
+            insert into channel_settings
+              (team_id, channel_id, mention_mode, mention_audience, approvers, updated_by, updated_at)
+            values ('TBAD', 'CBAD', 'approvers', '<!here>', null, 'U1', now())
+          `),
+        /channel_settings_mention_audience_check/,
+      );
+      await assert.rejects(
+        () =>
+          constraintClient.query(`
+            insert into channel_settings
+              (team_id, channel_id, mention_mode, mention_audience, approvers, updated_by, updated_at)
+            values ('TBAD', 'CBAD', 'off', '<!here>', null, 'U1', now())
+          `),
+        /channel_settings_mention_audience_check/,
+      );
+      await constraintClient.end();
+
+      // One down from latest reverts 0007 (schema only), not 0006.
+      const downMention = await migrator.migrateDown();
+      if (downMention.error) throw downMention.error;
+      assert.equal(await legacyTableName(), null);
+      // Intermediate shape is pre-0007 (`mention`, no `mention_mode`), so query raw.
+      const postDownMention = await sql<{
+        team_id: string;
+        channel_id: string;
+        mention: string | null;
+        approvers: string | null;
+      }>`
+        select team_id, channel_id, mention, approvers
+        from channel_settings
+        order by team_id, channel_id
+      `
+        .execute(migrationDb)
+        .then((result) => result.rows);
+      assert.deepEqual(postDownMention, [
+        { team_id: "TBACKFILL", channel_id: "CLEFT", mention: null, approvers: '["U9"]' },
+        { team_id: "TBACKFILL", channel_id: "CNEWER", mention: null, approvers: null },
+        { team_id: "TBACKFILL", channel_id: "COLDEST", mention: null, approvers: '["U1"]' },
+        { team_id: "TLEFTONLY", channel_id: "CGONE", mention: null, approvers: null },
+        { team_id: "TNULLMENTION", channel_id: "CNULL", mention: null, approvers: '["U5"]' },
+      ]);
+      assert.equal(
+        await sql<{ exists: boolean }>`
+          select exists (
+            select 1 from information_schema.columns
+            where table_name = 'channel_settings' and column_name = 'mention_mode'
+          ) as exists
+        `
+          .execute(migrationDb)
+          .then((result) => result.rows[0]?.exists),
+        false,
+      );
+
+      // A second down recreates only the empty legacy bot_channels shape.
+      const downLegacy = await migrator.migrateDown();
+      if (downLegacy.error) throw downLegacy.error;
       assert.equal(await legacyTableName(), "bot_channels");
       assert.equal(
         await sql<{ count: string }>`select count(*)::text as count from bot_channels`
@@ -499,10 +622,11 @@ try {
       assert.deepEqual(
         await migrationDb
           .selectFrom("channel_settings")
-          .selectAll()
+          .select(["team_id", "channel_id", "mention_mode", "mention_audience", "approvers"])
+          .orderBy("team_id")
           .orderBy("channel_id")
           .execute(),
-        settingsBeforeCleanup,
+        migratedSettings,
       );
     } finally {
       await migrationDb.destroy();
@@ -1018,24 +1142,47 @@ try {
     // Rejoining restores the retained route; an explicit switch changes it.
     slack.channels = ["CA", "CB"];
     assert.equal((await resolveChannel(store, slackClient)).channelId, "CA");
-    await store.setMention({ teamId: "TROUTE", channelId: "CB", mention: "<!here>", updatedBy: "U1" });
-    await store.setApprovers({ teamId: "TROUTE", channelId: "CB", approvers: ["U2"], updatedBy: "U1" });
-    await store.selectTeamChannel({ teamId: "TROUTE", channelId: "CB" });
-    assert.equal((await resolveChannel(store, slackClient)).channelId, "CB");
-    assert.deepEqual(await store.getChannelSettings("TROUTE", "CB"), {
-      mention: "<!here>",
-      approvers: ["U2"],
-    });
     await store.selectTeamChannel({ teamId: "TROUTE", channelId: "CB" });
     assert.equal(
-      await store.setSelectedChannelMention({
+      await store.setSelectedChannelMentionSetting({
+        teamId: "TROUTE",
+        expectedChannelId: "CB",
+        mention: { mode: "custom", audience: "<!here>" },
+        updatedBy: "U1",
+      }),
+      true,
+    );
+    assert.equal(
+      await store.setSelectedChannelApprovers({
+        teamId: "TROUTE",
+        expectedChannelId: "CB",
+        approvers: ["U2"],
+        updatedBy: "U1",
+      }),
+      true,
+    );
+    assert.equal((await resolveChannel(store, slackClient)).channelId, "CB");
+    assert.deepEqual(await store.getChannelSettings("TROUTE", "CB"), {
+      mention: { mode: "custom", audience: "<!here>" },
+      approvers: ["U2"],
+    });
+    assert.equal(
+      await store.setSelectedChannelMentionSetting({
         teamId: "TROUTE",
         expectedChannelId: "CA",
-        mention: "",
+        mention: { mode: "off" },
         updatedBy: "U3",
       }),
       false,
     );
+    assert.deepEqual(await store.getChannelSettings("TROUTE", "CB"), {
+      mention: { mode: "custom", audience: "<!here>" },
+      approvers: ["U2"],
+    });
+    assert.deepEqual(await store.getChannelSettings("TROUTE", "CA"), {
+      mention: { mode: "approvers" },
+      approvers: null,
+    });
 
     // Several memberships with no route are intentionally ambiguous.
     const ambiguous = makeSlackStub({ teamId: "TAMBIG", channels: ["CX", "CY"] });
@@ -1099,8 +1246,8 @@ try {
     await postVideo(app, first.cycleId!, first.attemptId);
     await postVideo(app, second.cycleId!, second.attemptId);
     assert.deepEqual(slack.postValidationArgs, [
-      { channel: "C0123", mention: null },
-      { channel: "C0123", mention: null },
+      { channel: "C0123", mention: "<!channel>" },
+      { channel: "C0123", mention: "<!channel>" },
     ]);
     assert.deepEqual(slack.uploadVideoChannels, ["C0123", "C0123"]);
   }
@@ -1109,17 +1256,163 @@ try {
   {
     const slack = makeSlackStub({ teamId: "TMENTION", channels: ["CM1"] });
     const app = makeApp(makeGithubStub(), slack);
-    await store.setMention({
-      teamId: "TMENTION",
-      channelId: "CM1",
-      mention: "<!subteam^S321|@design>",
-      updatedBy: "U1",
-    });
+    await store.initializeTeamChannelRoute({ teamId: "TMENTION", channelId: "CM1" });
+    assert.equal(
+      await store.setSelectedChannelMentionSetting({
+        teamId: "TMENTION",
+        expectedChannelId: "CM1",
+        mention: { mode: "custom", audience: "<!subteam^S321|@design>" },
+        updatedBy: "U1",
+      }),
+      true,
+    );
     const start = (await startRun(app, makeStart(22, { headSha: "mention0001" }))).body;
     await postVideo(app, start.cycleId!, start.attemptId);
     assert.deepEqual(slack.postValidationArgs, [
       { channel: "CM1", mention: "<!subteam^S321|@design>" },
     ]);
+
+    // Follow mode tracks later approver changes; custom mode does not.
+    assert.equal(
+      await store.setSelectedChannelMentionSetting({
+        teamId: "TMENTION",
+        expectedChannelId: "CM1",
+        mention: { mode: "approvers" },
+        updatedBy: "U1",
+      }),
+      true,
+    );
+    assert.equal(
+      await store.setSelectedChannelApprovers({
+        teamId: "TMENTION",
+        expectedChannelId: "CM1",
+        approvers: ["U9", "S321"],
+        updatedBy: "U1",
+      }),
+      true,
+    );
+    const follow = (await startRun(app, makeStart(2230, { headSha: "mention0002" }))).body;
+    await postVideo(app, follow.cycleId!, follow.attemptId);
+    assert.deepEqual(slack.postValidationArgs.at(-1), {
+      channel: "CM1",
+      mention: "<@U9> <!subteam^S321>",
+    });
+
+    assert.equal(
+      await store.setSelectedChannelMentionSetting({
+        teamId: "TMENTION",
+        expectedChannelId: "CM1",
+        mention: { mode: "custom", audience: "<!here>" },
+        updatedBy: "U1",
+      }),
+      true,
+    );
+    assert.equal(
+      await store.setSelectedChannelApprovers({
+        teamId: "TMENTION",
+        expectedChannelId: "CM1",
+        approvers: ["U1"],
+        updatedBy: "U1",
+      }),
+      true,
+    );
+    const custom = (await startRun(app, makeStart(2231, { headSha: "mention0003" }))).body;
+    await postVideo(app, custom.cycleId!, custom.attemptId);
+    assert.deepEqual(slack.postValidationArgs.at(-1), {
+      channel: "CM1",
+      mention: "<!here>",
+    });
+
+    assert.equal(
+      await store.setSelectedChannelMentionSetting({
+        teamId: "TMENTION",
+        expectedChannelId: "CM1",
+        mention: { mode: "off" },
+        updatedBy: "U1",
+      }),
+      true,
+    );
+    const off = (await startRun(app, makeStart(2232, { headSha: "mention0004" }))).body;
+    await postVideo(app, off.cycleId!, off.attemptId);
+    assert.deepEqual(slack.postValidationArgs.at(-1), {
+      channel: "CM1",
+      mention: null,
+    });
+
+    // A validation posted in channel A keeps A's channel coordinates after a switch.
+    await store.selectTeamChannel({ teamId: "TMENTION", channelId: "CM1" });
+    assert.equal(
+      await store.setSelectedChannelMentionSetting({
+        teamId: "TMENTION",
+        expectedChannelId: "CM1",
+        mention: { mode: "custom", audience: "<!channel>" },
+        updatedBy: "U1",
+      }),
+      true,
+    );
+    slack.channels = ["CM1", "CM2"];
+    const postedInA = (await startRun(app, makeStart(2233, { headSha: "mention0005" }))).body;
+    await postVideo(app, postedInA.cycleId!, postedInA.attemptId);
+    assert.deepEqual(slack.postValidationArgs.at(-1), {
+      channel: "CM1",
+      mention: "<!channel>",
+    });
+    await store.selectTeamChannel({ teamId: "TMENTION", channelId: "CM2" });
+    assert.equal((await store.getCycle(postedInA.cycleId!))?.slackChannelId, "CM1");
+    assert.deepEqual(await store.getChannelSettings("TMENTION", "CM1"), {
+      mention: { mode: "custom", audience: "<!channel>" },
+      approvers: ["U1"],
+    });
+
+    // Settings are read before Slack delivery, and transient failures retry
+    // without duplicating Slack side effects.
+    let settingsReads = 0;
+    const beforeUploads = slack.uploadVideoCalls;
+    const beforePosts = slack.postValidationCalls;
+    let settingsReadAfterSlackSideEffect = false;
+    const getChannelSettings = store.getChannelSettings.bind(store);
+    store.getChannelSettings = async (teamId, channelId) => {
+      settingsReads += 1;
+      if (slack.uploadVideoCalls !== beforeUploads || slack.postValidationCalls !== beforePosts) {
+        settingsReadAfterSlackSideEffect = true;
+      }
+      if (settingsReads === 1) throw new Error("transient settings read");
+      return getChannelSettings(teamId, channelId);
+    };
+    try {
+      const retried = (await startRun(app, makeStart(2234, { headSha: "mention0006" }))).body;
+      assert.equal((await postVideo(app, retried.cycleId!, retried.attemptId)).res.statusCode, 200);
+      assert.equal(slack.uploadVideoCalls, beforeUploads + 1);
+      assert.equal(slack.postValidationCalls, beforePosts + 1);
+      assert.ok(settingsReads >= 2);
+      assert.equal(settingsReadAfterSlackSideEffect, false);
+    } finally {
+      store.getChannelSettings = getChannelSettings;
+    }
+
+    // Persisting Slack message coordinates is idempotent and retries after a
+    // transient DB failure without reposting either Slack artifact.
+    let attachAttempts = 0;
+    const attachSlackMessage = store.attachSlackMessage.bind(store);
+    store.attachSlackMessage = async (cycleId, channelId, messageTs) => {
+      attachAttempts += 1;
+      if (attachAttempts === 1) throw new Error("transient Slack-coordinate write");
+      return attachSlackMessage(cycleId, channelId, messageTs);
+    };
+    try {
+      const uploadsBeforeAttachRetry = slack.uploadVideoCalls;
+      const postsBeforeAttachRetry = slack.postValidationCalls;
+      const retried = (await startRun(app, makeStart(2235, { headSha: "mention0007" }))).body;
+      assert.equal((await postVideo(app, retried.cycleId!, retried.attemptId)).res.statusCode, 200);
+      assert.equal(attachAttempts, 2);
+      assert.equal(slack.uploadVideoCalls, uploadsBeforeAttachRetry + 1);
+      assert.equal(slack.postValidationCalls, postsBeforeAttachRetry + 1);
+      const persisted = await store.getCycle(retried.cycleId!);
+      assert.equal(persisted?.slackChannelId, "CM2");
+      assert.ok(persisted?.slackMessageTs);
+    } finally {
+      store.attachSlackMessage = attachSlackMessage;
+    }
   }
 
   // --- Video delivery observes explicit switches and never falls back ---
@@ -1293,26 +1586,47 @@ try {
       return { res, body: { response_type: "ephemeral", text: message?.text } };
     };
 
+    const defaultSummary = [
+      "Approvers: anyone in the channel",
+      "Notifications: following approvers — @channel",
+    ].join("\n");
+
     assert.equal(
       (await run("status")).body.text,
       "Feature-Rec is already present in <#CCMD>, but no review channel is selected. Run `/feature-rec channel #channel-name` to select it.",
     );
+    const mentionBeforeSelect = (await run("mention")).body.text ?? "";
+    assert.ok(
+      mentionBeforeSelect.startsWith(
+        "No review channel is selected. Run `/feature-rec channel #channel-name` first.",
+      ),
+    );
+    assert.ok(mentionBeforeSelect.includes("`/feature-rec mention approvers`"));
+    assert.equal(mentionBeforeSelect.includes("Approvers:"), false);
+    const approversBeforeSelect = (await run("approvers")).body.text ?? "";
+    assert.ok(
+      approversBeforeSelect.startsWith(
+        "No review channel is selected. Run `/feature-rec channel #channel-name` first.",
+      ),
+    );
+    assert.ok(approversBeforeSelect.includes("Usage: `/feature-rec approvers"));
+    assert.equal(approversBeforeSelect.includes("Notifications:"), false);
+    assert.equal(
+      (await run("mention off")).body.text,
+      "No review channel is selected. Run `/feature-rec channel #channel-name` first.",
+    );
     assert.equal(
       (await run("channel <#CCMD|reviews>")).body.text,
-      "Feature-Rec videos will now be sent to <#CCMD>. Existing mention and approver settings for that channel are unchanged.",
+      ["Feature-Rec videos will now be sent to <#CCMD>.", defaultSummary].join("\n"),
     );
     assert.equal(slack.postMessageCalls.length, 0);
-    assert.equal(
-      (await run("channel")).body.text,
-      "Usage: `/feature-rec channel #channel-name`.",
-    );
-    assert.equal(
-      (await run("channel #reviews")).body.text,
-      "Usage: `/feature-rec channel #channel-name`.",
-    );
-    assert.equal(
-      (await run("channel <#CCMD> <#CCMD2>")).body.text,
-      "Usage: `/feature-rec channel #channel-name`.",
+    const channelStatus = (await run("channel")).body.text ?? "";
+    assert.ok(channelStatus.includes("Selected review channel: <#CCMD> (available)."));
+    assert.ok(channelStatus.includes(defaultSummary));
+    assert.ok(channelStatus.includes("Usage: `/feature-rec channel #channel-name`"));
+    assert.ok((await run("channel #reviews")).body.text?.includes("Usage: `/feature-rec channel"));
+    assert.ok(
+      (await run("channel <#CCMD> <#CCMD2>")).body.text?.includes("Usage: `/feature-rec channel"),
     );
     assert.equal(
       (await run("channel <#CABSENT|absent>")).body.text,
@@ -1320,27 +1634,33 @@ try {
     );
 
     // Selection works from a conversation without the bot and from a DM,
-    // accepts private channels, and preserves target-channel settings.
-    await store.setMention({
-      teamId: "TCMD",
-      channelId: "CCMD2",
-      mention: "<!channel>",
-      updatedBy: "UOLD",
-    });
-    await store.setApprovers({
-      teamId: "TCMD",
-      channelId: "CCMD2",
-      approvers: ["U111"],
-      updatedBy: "UOLD",
-    });
+    // accepts private channels, and restores target-channel settings.
     slack.channels = ["CCMD", "CCMD2", "GPRIVATE"];
+    slack.channelMembers.CCMD2 = ["UCMD", "U111"];
     await run("channel <#CCMD2|other>", "CWITHOUTBOT", "TCMD", "UANYONE");
+    assert.ok(
+      ((await run("mention @channel")).body.text ?? "").includes(
+        "Validation requests in <#CCMD2> will mention <!channel>.",
+      ),
+    );
+    assert.ok(
+      ((await run("approvers <@U111|bob>")).body.text ?? "").includes(
+        "Only <@U111> can approve in <#CCMD2>.",
+      ),
+    );
     assert.deepEqual(await store.getChannelSettings("TCMD", "CCMD2"), {
-      mention: "<!channel>",
+      mention: { mode: "custom", audience: "<!channel>" },
       approvers: ["U111"],
     });
-    await run("channel <#GPRIVATE|private>", "D123", "TCMD", "UANYONE");
+    const switchPrivate = (await run("channel <#GPRIVATE|private>", "D123", "TCMD", "UANYONE"))
+      .body.text ?? "";
+    assert.ok(switchPrivate.includes("Feature-Rec videos will now be sent to <#GPRIVATE>."));
+    assert.ok(switchPrivate.includes(defaultSummary));
     assert.equal(await store.getSelectedChannelId("TCMD"), "GPRIVATE");
+    const switchBack = (await run("channel <#CCMD2|other>", "D123", "TCMD", "UANYONE")).body
+      .text ?? "";
+    assert.ok(switchBack.includes("Approvers: <@U111>"));
+    assert.ok(switchBack.includes("Notifications: custom — <!channel>"));
     await run("channel <#CCMD|reviews>", "D123", "TCMD", "UANYONE");
     assert.equal(slack.postMessageCalls.length, 0);
     assert.equal(
@@ -1349,68 +1669,103 @@ try {
     );
     slack.channels = ["CCMD"];
 
-    assert.equal((await run("mention")).body.text, "Mention for <#CCMD>: @here (default)");
+    const mentionHelp = (await run("mention")).body.text ?? "";
+    assert.ok(mentionHelp.includes(`For <#CCMD>:`));
+    assert.ok(mentionHelp.includes(defaultSummary));
+    assert.ok(mentionHelp.includes("`/feature-rec mention approvers`"));
 
     const set = await run("mention @product-team <@U111|bob>");
-    assert.equal(
-      set.body.text,
-      "Validation requests in <#CCMD> will mention <!subteam^S777|@product-team> <@U111>.",
+    assert.ok(
+      set.body.text?.startsWith(
+        "Validation requests in <#CCMD> will mention <!subteam^S777|@product-team> <@U111>.",
+      ),
     );
-    assert.equal(
-      (await store.getChannelSettings("TCMD", "CCMD"))?.mention,
-      "<!subteam^S777|@product-team> <@U111>",
-    );
+    assert.ok(set.body.text?.includes("Notifications: custom — <!subteam^S777|@product-team> <@U111>"));
+    assert.deepEqual((await store.getChannelSettings("TCMD", "CCMD")).mention, {
+      mode: "custom",
+      audience: "<!subteam^S777|@product-team> <@U111>",
+    });
 
     const missingUser = await run("mention <@UMISSING|missing>");
     assert.ok(missingUser.body.text?.includes("<@UMISSING> is not a member"));
-    assert.equal(
-      (await store.getChannelSettings("TCMD", "CCMD"))?.mention,
-      "<!subteam^S777|@product-team> <@U111>",
-    );
+    assert.deepEqual((await store.getChannelSettings("TCMD", "CCMD")).mention, {
+      mode: "custom",
+      audience: "<!subteam^S777|@product-team> <@U111>",
+    });
     slack.usergroupMembers.S777 = ["U222", "UMISSING"];
     const incompleteGroup = await run("mention @product-team");
     assert.ok(incompleteGroup.body.text?.includes("<@UMISSING> is not a member"));
     slack.usergroupMembers.S777 = ["U222"];
-    assert.equal(
-      (await run("mention")).body.text,
-      "Mention for <#CCMD>: <!subteam^S777|@product-team> <@U111>",
-    );
 
     const badHandle = await run("mention @nope");
     assert.ok(badHandle.body.text?.startsWith("Unknown mention target @nope."));
-    assert.equal(
-      (await store.getChannelSettings("TCMD", "CCMD"))?.mention,
-      "<!subteam^S777|@product-team> <@U111>",
-    );
-
-    assert.equal(
-      (await run("mention @here")).body.text,
-      "Validation requests in <#CCMD> will mention <!here>.",
-    );
-    assert.equal((await store.getChannelSettings("TCMD", "CCMD"))?.mention, "<!here>");
-    assert.ok((await run("mention off")).body.text?.startsWith("Unknown mention target off."));
-    assert.equal((await store.getChannelSettings("TCMD", "CCMD"))?.mention, "<!here>");
-
-    // Existing empty mention settings remain readable and can be overwritten,
-    // but the command no longer creates them.
-    await store.setMention({
-      teamId: "TCMD",
-      channelId: "CCMD",
-      mention: "",
-      updatedBy: "ULEGACY",
+    assert.deepEqual((await store.getChannelSettings("TCMD", "CCMD")).mention, {
+      mode: "custom",
+      audience: "<!subteam^S777|@product-team> <@U111>",
     });
-    assert.equal((await store.getChannelSettings("TCMD", "CCMD"))?.mention, "");
-    assert.equal((await run("mention")).body.text, "Mention for <#CCMD>: off");
 
-    assert.equal(
-      (await run("approvers")).body.text,
-      "For <#CCMD>: Approvers: everyone in the channel.",
+    assert.ok(
+      ((await run("mention @here")).body.text ?? "").startsWith(
+        "Validation requests in <#CCMD> will mention <!here>.",
+      ),
+    );
+    assert.deepEqual((await store.getChannelSettings("TCMD", "CCMD")).mention, {
+      mode: "custom",
+      audience: "<!here>",
+    });
+    assert.ok(
+      ((await run("mention @here <@U111|bob>")).body.text ?? "").includes(
+        "Validation requests in <#CCMD> will mention <!here> <@U111>.",
+      ),
     );
     assert.equal(
-      (await run("approvers @product-team <@U111|bob>")).body.text,
-      "Only <!subteam^S777>, <@U111> can approve in <#CCMD>.",
+      (await run("mention @channel <@U111|bob>")).body.text,
+      "Use @channel by itself: `/feature-rec mention @channel`.",
     );
-    assert.deepEqual((await store.getChannelSettings("TCMD", "CCMD"))?.approvers, [
+    assert.equal(
+      (await run("mention @channel @here")).body.text,
+      "Use @channel by itself: `/feature-rec mention @channel`.",
+    );
+    assert.ok(
+      ((await run("mention @channel")).body.text ?? "").startsWith(
+        "Validation requests in <#CCMD> will mention <!channel>.",
+      ),
+    );
+
+    assert.ok(
+      ((await run("mention off")).body.text ?? "").startsWith(
+        "Validation requests in <#CCMD> will not mention anyone.",
+      ),
+    );
+    assert.deepEqual((await store.getChannelSettings("TCMD", "CCMD")).mention, { mode: "off" });
+    assert.ok(
+      ((await run("mention approvers")).body.text ?? "").startsWith(
+        "Validation notifications in <#CCMD> now follow approvers.",
+      ),
+    );
+    assert.deepEqual((await store.getChannelSettings("TCMD", "CCMD")).mention, {
+      mode: "approvers",
+    });
+    assert.ok(
+      (await run("mention off @here")).body.text?.includes("`approvers` and `off` must be used alone"),
+    );
+    assert.ok(
+      (await run("mention approvers <@U111|bob>")).body.text?.includes(
+        "`approvers` and `off` must be used alone",
+      ),
+    );
+
+    const approversHelp = (await run("approvers")).body.text ?? "";
+    assert.ok(approversHelp.includes(defaultSummary));
+    assert.ok(approversHelp.includes("Usage: `/feature-rec approvers"));
+    const setApprovers = await run("approvers @product-team <@U111|bob>");
+    assert.ok(
+      setApprovers.body.text?.startsWith(
+        "Only <!subteam^S777|@product-team> and <@U111> can approve in <#CCMD>.",
+      ),
+    );
+    assert.ok(setApprovers.body.text?.includes("Notifications: following approvers —"));
+    assert.deepEqual((await store.getChannelSettings("TCMD", "CCMD")).approvers, [
       "S777",
       "U111",
     ]);
@@ -1424,39 +1779,77 @@ try {
       (await run("approvers @channel <@U111|bob>")).body.text,
       "Use @channel by itself: `/feature-rec approvers @channel`.",
     );
-    assert.deepEqual((await store.getChannelSettings("TCMD", "CCMD"))?.approvers, [
+    assert.deepEqual((await store.getChannelSettings("TCMD", "CCMD")).approvers, [
       "S777",
       "U111",
     ]);
-    assert.equal(
-      (await run("approvers <!channel>")).body.text,
-      "Everyone in <#CCMD> can now approve.",
+    // Custom mentions survive approver changes.
+    assert.ok(
+      ((await run("mention <@U111|bob>")).body.text ?? "").includes("Notifications: custom — <@U111>"),
     );
-    assert.equal((await store.getChannelSettings("TCMD", "CCMD"))?.approvers, null);
+    const clearApprovers = await run("approvers <!channel>");
+    assert.ok(clearApprovers.body.text?.startsWith("Everyone in <#CCMD> can now approve."));
+    assert.ok(clearApprovers.body.text?.includes("Notifications: custom — <@U111>"));
+    assert.equal((await store.getChannelSettings("TCMD", "CCMD")).approvers, null);
     assert.ok(
       (await run("approvers everyone")).body.text?.startsWith("Unknown approver everyone."),
     );
     assert.ok((await run("approvers off")).body.text?.startsWith("Unknown approver off."));
 
+    await run("mention off");
     slack.channels = ["CCMD", "CCMD2"];
     const status = (await run("status")).body.text ?? "";
     assert.ok(status.includes("Selected review channel: <#CCMD> (available)."));
-    assert.ok(status.includes("Mention: off"));
-    assert.ok(status.includes("Approvers: everyone in the channel."));
-    assert.equal(status.includes("will move"), false);
+    assert.ok(status.includes("Approvers: anyone in the channel"));
+    assert.ok(status.includes("Notifications: off"));
+    assert.equal(status.includes("Usage:"), false);
 
     slack.channels = ["CCMD2"];
     const unavailableStatus = (await run("status")).body.text ?? "";
     assert.ok(unavailableStatus.includes("Selected review channel: <#CCMD> (unavailable)."));
     assert.ok(unavailableStatus.includes("Invite @Feature-Rec back"));
+    assert.ok(unavailableStatus.endsWith(slackSelectedChannelUnavailableMessage("CCMD")));
+    // Reads still show current settings/help when the selected channel is gone.
+    const unavailableMention = (await run("mention")).body.text ?? "";
+    assert.ok(
+      unavailableMention.startsWith(
+        [
+          "For <#CCMD>:",
+          "Approvers: anyone in the channel",
+          "Notifications: off",
+        ].join("\n"),
+      ),
+    );
+    assert.ok(unavailableMention.includes("`/feature-rec mention approvers`"));
+    assert.ok(unavailableMention.endsWith(slackSelectedChannelUnavailableMessage("CCMD")));
+    const unavailableApprovers = (await run("approvers")).body.text ?? "";
+    assert.ok(
+      unavailableApprovers.startsWith(
+        [
+          "For <#CCMD>:",
+          "Approvers: anyone in the channel",
+          "Notifications: off",
+        ].join("\n"),
+      ),
+    );
+    assert.ok(unavailableApprovers.includes("Usage: `/feature-rec approvers"));
+    assert.ok(unavailableApprovers.endsWith(slackSelectedChannelUnavailableMessage("CCMD")));
+    // Writes remain gated on availability.
     assert.equal(
       (await run("mention @here")).body.text,
       slackSelectedChannelUnavailableMessage("CCMD"),
     );
+    assert.equal(
+      (await run("approvers @channel")).body.text,
+      slackSelectedChannelUnavailableMessage("CCMD"),
+    );
     slack.channels = ["CCMD", "CCMD2"];
 
-    assert.ok((await run("wat")).body.text?.startsWith("Usage:"));
-    assert.ok((await run("")).body.text?.startsWith("Usage:"));
+    const help = (await run("help")).body.text ?? "";
+    const empty = (await run("")).body.text ?? "";
+    assert.equal(help, empty);
+    assert.ok(help.startsWith("Feature-Rec commands:"));
+    assert.ok((await run("wat")).body.text?.startsWith("Feature-Rec commands:"));
 
     // The ack must not wait for the status command's Slack membership sweep.
     let releaseStatus: (() => void) | undefined;
@@ -1554,12 +1947,16 @@ try {
     const app = makeApp(github, slack);
     const start = (await startRun(app, makeStart(23, { headSha: "restrict01" }))).body;
     await postVideo(app, start.cycleId!, start.attemptId);
-    await store.setApprovers({
-      teamId: "TAPPR",
-      channelId: "C0123",
-      approvers: ["S900"],
-      updatedBy: "UADMIN",
-    });
+    await store.initializeTeamChannelRoute({ teamId: "TAPPR", channelId: "C0123" });
+    assert.equal(
+      await store.setSelectedChannelApprovers({
+        teamId: "TAPPR",
+        expectedChannelId: "C0123",
+        approvers: ["S900"],
+        updatedBy: "UADMIN",
+      }),
+      true,
+    );
 
     await postBlockAction(app, {
       cycleId: start.cycleId!,
@@ -1853,7 +2250,7 @@ try {
     );
   }
 
-  // --- Route/store invariants: no settings side effect, isolation, switching ---
+  // --- Route/store invariants: defaults, isolation, guarded writes, modes ---
   {
     const first = await store.initializeTeamChannelRoute({
       teamId: "TSTORE",
@@ -1866,20 +2263,95 @@ try {
     assert.equal(first.initializedRoute, true);
     assert.equal(second.initializedRoute, false);
     assert.equal(await store.getSelectedChannelId("TSTORE"), "CSTORE1");
-    assert.equal(await store.getChannelSettings("TSTORE", "CSTORE1"), null);
+    assert.deepEqual(await store.getChannelSettings("TSTORE", "CSTORE1"), {
+      mention: { mode: "approvers" },
+      approvers: null,
+    });
+    {
+      const countClient = new Client({ connectionString: testUrl });
+      await countClient.connect();
+      const count = await countClient.query<{ count: string }>(
+        `select count(*)::text as count from channel_settings
+         where team_id = 'TSTORE' and channel_id = 'CSTORE1'`,
+      );
+      await countClient.end();
+      assert.equal(count.rows[0]?.count, "0");
+    }
 
-    await store.setMention({
-      teamId: "TSTORE",
-      channelId: "CSTORE2",
-      mention: "<!channel>",
-      updatedBy: "U1",
-    });
-    await store.setApprovers({
-      teamId: "TSTORE",
-      channelId: "CSTORE2",
+    // First approver write materializes follow-approvers mention state.
+    assert.equal(
+      await store.setSelectedChannelApprovers({
+        teamId: "TSTORE",
+        expectedChannelId: "CSTORE1",
+        approvers: ["U2"],
+        updatedBy: "U1",
+      }),
+      true,
+    );
+    assert.deepEqual(await store.getChannelSettings("TSTORE", "CSTORE1"), {
+      mention: { mode: "approvers" },
       approvers: ["U2"],
-      updatedBy: "U1",
     });
+
+    await store.selectTeamChannel({ teamId: "TSTORE", channelId: "CSTORE2" });
+    assert.equal(
+      await store.setSelectedChannelMentionSetting({
+        teamId: "TSTORE",
+        expectedChannelId: "CSTORE2",
+        mention: { mode: "custom", audience: "<!channel>" },
+        updatedBy: "U1",
+      }),
+      true,
+    );
+    assert.deepEqual(await store.getChannelSettings("TSTORE", "CSTORE2"), {
+      mention: { mode: "custom", audience: "<!channel>" },
+      approvers: null,
+    });
+    assert.equal(
+      await store.setSelectedChannelApprovers({
+        teamId: "TSTORE",
+        expectedChannelId: "CSTORE2",
+        approvers: ["U2"],
+        updatedBy: "U1",
+      }),
+      true,
+    );
+    assert.equal(
+      await store.setSelectedChannelMentionSetting({
+        teamId: "TSTORE",
+        expectedChannelId: "CSTORE2",
+        mention: { mode: "off" },
+        updatedBy: "U1",
+      }),
+      true,
+    );
+    assert.deepEqual(await store.getChannelSettings("TSTORE", "CSTORE2"), {
+      mention: { mode: "off" },
+      approvers: ["U2"],
+    });
+    assert.equal(
+      await store.setSelectedChannelMentionSetting({
+        teamId: "TSTORE",
+        expectedChannelId: "CSTORE2",
+        mention: { mode: "approvers" },
+        updatedBy: "U1",
+      }),
+      true,
+    );
+    assert.deepEqual(await store.getChannelSettings("TSTORE", "CSTORE2"), {
+      mention: { mode: "approvers" },
+      approvers: ["U2"],
+    });
+    assert.equal(
+      await store.setSelectedChannelMentionSetting({
+        teamId: "TSTORE",
+        expectedChannelId: "CSTORE2",
+        mention: { mode: "custom", audience: "<!here>" },
+        updatedBy: "U1",
+      }),
+      true,
+    );
+
     await Promise.all([
       store.selectTeamChannel({ teamId: "TSTORE", channelId: "CSTORE2" }),
       store.selectTeamChannel({ teamId: "TSTORE", channelId: "CSTORE3" }),
@@ -1887,7 +2359,12 @@ try {
     const selectedChannelId = await store.getSelectedChannelId("TSTORE");
     assert.ok(selectedChannelId === "CSTORE2" || selectedChannelId === "CSTORE3");
     assert.deepEqual(await store.getChannelSettings("TSTORE", "CSTORE2"), {
-      mention: "<!channel>",
+      mention: { mode: "custom", audience: "<!here>" },
+      approvers: ["U2"],
+    });
+    // Settings remain isolated by channel.
+    assert.deepEqual(await store.getChannelSettings("TSTORE", "CSTORE1"), {
+      mention: { mode: "approvers" },
       approvers: ["U2"],
     });
 
@@ -1895,10 +2372,11 @@ try {
       teamId: "TSTORE-OTHER",
       channelId: "COTHER",
     });
-    assert.equal(
-      await store.getSelectedChannelId("TSTORE-OTHER"),
-      "COTHER",
-    );
+    assert.equal(await store.getSelectedChannelId("TSTORE-OTHER"), "COTHER");
+    assert.deepEqual(await store.getChannelSettings("TSTORE-OTHER", "COTHER"), {
+      mention: { mode: "approvers" },
+      approvers: null,
+    });
   }
 
   // --- Advisory onboarding probe failure cannot stall the start ---

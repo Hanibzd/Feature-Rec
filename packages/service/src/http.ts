@@ -11,12 +11,18 @@ import {
   slackSelectedChannelUnavailableMessage,
 } from "@feature-rec/core";
 import type { ServiceEnv } from "./env";
+import {
+  describeChannelSettings,
+  effectiveMention,
+  formatApproverList,
+  joinList,
+} from "./channel-settings";
 import { ChannelResolutionError, resolveChannel } from "./channels";
 import { GitHubClient } from "./github";
 import { withRetry } from "./retry";
 import { SlackClient, verifySlackSignature } from "./slack";
 import type { SlackUsergroup } from "./slack";
-import type { CycleRecord, CycleStore } from "./storage";
+import { DEFAULT_CHANNEL_SETTINGS, type CycleRecord, type CycleStore } from "./storage";
 
 const VIDEO_BODY_LIMIT_BYTES = 500 * 1024 * 1024;
 
@@ -67,30 +73,36 @@ const CHANNEL_MENTION_RE = /^<#([CG][A-Z0-9]+)(?:\|[^>]*)?>$/;
 // instead of becoming a 500.
 class CommandError extends Error {}
 
-const COMMAND_USAGE = [
-  "Usage:",
-  "`/feature-rec channel #channel-name` — select the channel that receives videos",
-  "`/feature-rec mention @here|@channel|@usergroup|@user…` — who validation requests mention; no target shows the current value",
-  "`/feature-rec approvers @channel|@usergroup|@user…` — restrict who can approve; @channel allows everyone in the channel; no argument shows the current value",
-  "`/feature-rec status` — show routing, mention, and approvers",
+const GENERAL_HELP = [
+  "Feature-Rec commands:",
+  "`/feature-rec channel [#channel]` — select or show the review channel",
+  "`/feature-rec mention [approvers|off|@audience…]` — who validation requests mention",
+  "`/feature-rec approvers [@channel|@audience…]` — who may approve",
+  "`/feature-rec status` — show the selected channel and settings",
+  "`/feature-rec help` — show this help",
 ].join("\n");
+
+const CHANNEL_HELP = [
+  "Usage: `/feature-rec channel #channel-name`",
+  "Select a public or private channel that @Feature-Rec has joined.",
+  "Each channel keeps its own approver and notification settings.",
+].join("\n");
+
+const MENTION_HELP = [
+  "Usage:",
+  "`/feature-rec mention approvers` — mention the channel's current approvers (default)",
+  "`/feature-rec mention off` — post validation requests without mentioning anyone",
+  "`/feature-rec mention @here|@channel|@usergroup|@user…` — mention a custom audience",
+  "`@channel` must be used alone; `@here` may be combined with users or groups.",
+].join("\n");
+
+const APPROVERS_HELP = [
+  "Usage: `/feature-rec approvers @channel|@usergroup|@user…`",
+  "`@channel` allows anyone in the channel to approve.",
+  "Otherwise only the listed users and usergroup members may approve.",
+].join("\n");
+
 const COMMAND_FAILED = "Something went wrong. Please try again.";
-
-function describeMention(mention: string | null): string {
-  if (mention === null) return "@here (default)";
-  if (mention === "") return "off";
-  return mention;
-}
-
-function renderApproverIds(ids: string[]): string {
-  return ids.map((id) => (id.startsWith("S") ? `<!subteam^${id}>` : `<@${id}>`)).join(", ");
-}
-
-function describeApprovers(approvers: string[] | null): string {
-  return approvers && approvers.length > 0
-    ? `Approvers: ${renderApproverIds(approvers)}`
-    : "Approvers: everyone in the channel.";
-}
 
 function rawJsonBody(body: unknown): string {
   if (body && typeof body === "object") {
@@ -468,14 +480,21 @@ export function buildServer(input: {
         }),
       );
 
+      const settings = await withRetry(() =>
+        store.getChannelSettings(resolved.teamId, resolved.channelId),
+      );
+
       await slack.uploadVideo(cycle, resolved.channelId, video);
-      const settings = await store.getChannelSettings(resolved.teamId, resolved.channelId);
       const message = await slack.postValidation(
         cycle,
         resolved.channelId,
-        settings?.mention ?? null,
+        effectiveMention(settings),
       );
-      const statusAfter = await store.attachSlackMessage(cycle.id, message.channel, message.ts);
+      // Persisting the same Slack coordinates is idempotent. Retry so a
+      // transient DB failure does not leave a live validation message untracked.
+      const statusAfter = await withRetry(() =>
+        store.attachSlackMessage(cycle.id, message.channel, message.ts),
+      );
       if (statusAfter === "superseded") {
         // Superseded after the transition but before the Slack post landed:
         // finalize the message we just posted so it can't strand in Slack.
@@ -622,7 +641,8 @@ export function buildServer(input: {
       } else if (input.subcommand === "status") {
         text = await statusCommand(context);
       } else {
-        text = COMMAND_USAGE;
+        // Absent subcommand, `help`, and unknown subcommands share general help.
+        text = GENERAL_HELP;
       }
     } catch (err) {
       if (err instanceof CommandError) {
@@ -653,30 +673,56 @@ export function buildServer(input: {
   };
 
   async function channelCommand(input: CommandContext): Promise<string> {
+    if (input.args.length === 0) {
+      const selectedChannelId = await store.getSelectedChannelId(input.teamId);
+      if (!selectedChannelId) {
+        return [`No review channel is selected.`, CHANNEL_HELP].join("\n");
+      }
+      const present = input.botChannelIds.includes(selectedChannelId);
+      const settings = await store.getChannelSettings(input.teamId, selectedChannelId);
+      const lines = [
+        `Selected review channel: <#${selectedChannelId}> (${present ? "available" : "unavailable"}).`,
+        describeChannelSettings(settings),
+        CHANNEL_HELP,
+      ];
+      if (!present) lines.push(slackSelectedChannelUnavailableMessage(selectedChannelId));
+      return lines.join("\n");
+    }
     if (input.args.length !== 1) {
-      throw new CommandError("Usage: `/feature-rec channel #channel-name`.");
+      throw new CommandError(CHANNEL_HELP);
     }
     const target = CHANNEL_MENTION_RE.exec(input.args[0]);
-    if (!target) throw new CommandError("Usage: `/feature-rec channel #channel-name`.");
+    if (!target) throw new CommandError(CHANNEL_HELP);
     const channelId = target[1];
     if (!input.botChannelIds.includes(channelId)) {
       throw new CommandError(`Invite @Feature-Rec to <#${channelId}>, then try again.`);
     }
     await store.selectTeamChannel({ teamId: input.teamId, channelId });
-    return `Feature-Rec videos will now be sent to <#${channelId}>. Existing mention and approver settings for that channel are unchanged.`;
+    const settings = await store.getChannelSettings(input.teamId, channelId);
+    return [
+      `Feature-Rec videos will now be sent to <#${channelId}>.`,
+      describeChannelSettings(settings),
+    ].join("\n");
+  }
+
+  function missingSelectedChannelMessage(botChannelIds: string[]): string {
+    if (botChannelIds.length === 0) return SLACK_NO_CHANNEL_MESSAGE;
+    if (botChannelIds.length > 1) return SLACK_MULTIPLE_CHANNELS_MESSAGE;
+    return "No review channel is selected. Run `/feature-rec channel #channel-name` first.";
+  }
+
+  // Reads (status/help) only need a selected channel id. Writes still require
+  // the bot to be present so membership checks and delivery stay coherent.
+  async function requireSelectedChannelId(input: CommandContext): Promise<string> {
+    const selectedChannelId = await store.getSelectedChannelId(input.teamId);
+    if (!selectedChannelId) {
+      throw new CommandError(missingSelectedChannelMessage(input.botChannelIds));
+    }
+    return selectedChannelId;
   }
 
   async function selectedCommandChannel(input: CommandContext): Promise<string> {
-    const selectedChannelId = await store.getSelectedChannelId(input.teamId);
-    if (!selectedChannelId) {
-      if (input.botChannelIds.length === 0) throw new CommandError(SLACK_NO_CHANNEL_MESSAGE);
-      if (input.botChannelIds.length > 1) {
-        throw new CommandError(SLACK_MULTIPLE_CHANNELS_MESSAGE);
-      }
-      throw new CommandError(
-        "No Feature-Rec review channel is selected. Run `/feature-rec channel #channel-name` to select one.",
-      );
-    }
+    const selectedChannelId = await requireSelectedChannelId(input);
     if (!input.botChannelIds.includes(selectedChannelId)) {
       throw new CommandError(slackSelectedChannelUnavailableMessage(selectedChannelId));
     }
@@ -691,31 +737,94 @@ export function buildServer(input: {
     }
   }
 
+  async function confirmChannelSettings(
+    teamId: string,
+    channelId: string,
+    written: boolean,
+    headline: string,
+  ): Promise<string> {
+    assertGuardedSettingWrite(written);
+    const settings = await store.getChannelSettings(teamId, channelId);
+    return [headline, describeChannelSettings(settings)].join("\n");
+  }
+
   async function mentionCommand(input: CommandContext): Promise<string> {
-    const channelId = await selectedCommandChannel(input);
     if (input.args.length === 0) {
+      const channelId = await store.getSelectedChannelId(input.teamId);
+      if (!channelId) {
+        return [missingSelectedChannelMessage(input.botChannelIds), MENTION_HELP].join("\n");
+      }
       const settings = await store.getChannelSettings(input.teamId, channelId);
-      return `Mention for <#${channelId}>: ${describeMention(settings?.mention ?? null)}`;
+      const lines = [`For <#${channelId}>:`, describeChannelSettings(settings), MENTION_HELP];
+      if (!input.botChannelIds.includes(channelId)) {
+        lines.push(slackSelectedChannelUnavailableMessage(channelId));
+      }
+      return lines.join("\n");
     }
+
+    const channelId = await selectedCommandChannel(input);
+    if (input.args.some((token) => token === "approvers" || token === "off")) {
+      if (input.args.length !== 1) {
+        throw new CommandError(
+          "`approvers` and `off` must be used alone: `/feature-rec mention approvers` or `/feature-rec mention off`.",
+        );
+      }
+      const mode = input.args[0] as "approvers" | "off";
+      const written = await store.setSelectedChannelMentionSetting({
+        teamId: input.teamId,
+        expectedChannelId: channelId,
+        mention: { mode },
+        updatedBy: input.userId,
+      });
+      return confirmChannelSettings(
+        input.teamId,
+        channelId,
+        written,
+        mode === "off"
+          ? `Validation requests in <#${channelId}> will not mention anyone.`
+          : `Validation notifications in <#${channelId}> now follow approvers.`,
+      );
+    }
+
+    if (
+      input.args.length > 1 &&
+      input.args.some((token) => token === "@channel" || token === "<!channel>")
+    ) {
+      throw new CommandError("Use @channel by itself: `/feature-rec mention @channel`.");
+    }
+
     const targets = await resolveTargets(input.args, "mention");
     await validateTargetMembership(channelId, targets.concreteUserIds, "mentions");
-    const mention = targets.rendered.join(" ");
-    const written = await store.setSelectedChannelMention({
+    const audience = targets.rendered.join(" ");
+    const written = await store.setSelectedChannelMentionSetting({
       teamId: input.teamId,
       expectedChannelId: channelId,
-      mention,
+      mention: { mode: "custom", audience },
       updatedBy: input.userId,
     });
-    assertGuardedSettingWrite(written);
-    return `Validation requests in <#${channelId}> will mention ${mention}.`;
+    return confirmChannelSettings(
+      input.teamId,
+      channelId,
+      written,
+      `Validation requests in <#${channelId}> will mention ${audience}.`,
+    );
   }
 
   async function approversCommand(input: CommandContext): Promise<string> {
-    const channelId = await selectedCommandChannel(input);
     if (input.args.length === 0) {
+      const channelId = await store.getSelectedChannelId(input.teamId);
+      if (!channelId) {
+        return [missingSelectedChannelMessage(input.botChannelIds), APPROVERS_HELP].join("\n");
+      }
       const settings = await store.getChannelSettings(input.teamId, channelId);
-      return `For <#${channelId}>: ${describeApprovers(settings?.approvers ?? null)}`;
+      const lines = [`For <#${channelId}>:`, describeChannelSettings(settings), APPROVERS_HELP];
+      if (!input.botChannelIds.includes(channelId)) {
+        lines.push(slackSelectedChannelUnavailableMessage(channelId));
+      }
+      return lines.join("\n");
     }
+
+    const channelId = await selectedCommandChannel(input);
     if (input.args.some((token) => token === "@channel" || token === "<!channel>")) {
       if (input.args.length > 1) {
         throw new CommandError("Use @channel by itself: `/feature-rec approvers @channel`.");
@@ -726,8 +835,12 @@ export function buildServer(input: {
         approvers: null,
         updatedBy: input.userId,
       });
-      assertGuardedSettingWrite(written);
-      return `Everyone in <#${channelId}> can now approve.`;
+      return confirmChannelSettings(
+        input.teamId,
+        channelId,
+        written,
+        `Everyone in <#${channelId}> can now approve.`,
+      );
     }
     const targets = await resolveTargets(input.args, "approver");
     await validateTargetMembership(channelId, targets.concreteUserIds, "approvers");
@@ -737,8 +850,12 @@ export function buildServer(input: {
       approvers: targets.storedIds,
       updatedBy: input.userId,
     });
-    assertGuardedSettingWrite(written);
-    return `Only ${renderApproverIds(targets.storedIds)} can approve in <#${channelId}>.`;
+    return confirmChannelSettings(
+      input.teamId,
+      channelId,
+      written,
+      `Only ${joinList(targets.rendered)} can approve in <#${channelId}>.`,
+    );
   }
 
   async function resolveTargets(
@@ -825,8 +942,7 @@ export function buildServer(input: {
     const present = input.botChannelIds.includes(selectedChannelId);
     const lines = [
       `Selected review channel: <#${selectedChannelId}> (${present ? "available" : "unavailable"}).`,
-      `Mention: ${describeMention(settings?.mention ?? null)}`,
-      describeApprovers(settings?.approvers ?? null),
+      describeChannelSettings(settings),
     ];
     if (!present) {
       lines.push(slackSelectedChannelUnavailableMessage(selectedChannelId));
@@ -855,15 +971,18 @@ export function buildServer(input: {
     const teamId = payload.team?.id ?? (await slack.botIdentity()).teamId;
     const settings = cycle.slackChannelId
       ? await store.getChannelSettings(teamId, cycle.slackChannelId)
-      : null;
-    const approvers = settings?.approvers ?? null;
+      : DEFAULT_CHANNEL_SETTINGS;
+    const approvers = settings.approvers;
     if (await slack.isApprover(approvers, payload.user?.id)) return true;
     app.log.warn({ cycleId: cycle.id, slackUserId: payload.user?.id }, "unauthorized Slack approver");
     if (responseUrl && approvers) {
       // Best-effort: a modal can outlive its stashed response_url (30 min),
       // and a dead URL must not turn the rejection into a handler error.
       await slack
-        .respondEphemeral(responseUrl, `Only ${renderApproverIds(approvers)} can approve.`)
+        .respondEphemeral(
+          responseUrl,
+          `Only ${formatApproverList(approvers)} can approve.`,
+        )
         .catch((err: unknown) =>
           app.log.warn({ err, cycleId: cycle.id }, "unauthorized-approver ephemeral reply failed"),
         );

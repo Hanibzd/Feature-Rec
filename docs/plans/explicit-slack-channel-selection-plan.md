@@ -243,7 +243,7 @@ Use distinct user-facing failure text:
 “Feature-Rec is present in multiple channels. Run
 `/feature-rec channel #channel-name` to choose where videos should be sent.”
 - A selected route exists but the bot is no longer present:
-“The selected Feature-Rec channel <#…> is unavailable. Invite @Feature-Rec back
+“Feature-Rec is not currently in the selected review channel <#…>. Invite @Feature-Rec back
 or run `/feature-rec channel #another-channel` from any workspace conversation,
 then re-run.”
 

@@ -13,11 +13,20 @@ export type StartCycleResult = {
   | { created: false; attemptId: null }
 );
 
+export type MentionSetting =
+  | { mode: "approvers" }
+  | { mode: "off" }
+  | { mode: "custom"; audience: string };
+
 export type ChannelSettings = {
-  // Rendered mrkdwn mention prefix; null = default (@here), "" = legacy off.
-  mention: string | null;
+  mention: MentionSetting;
   // Slack S…/U… ids; null = everyone in the channel may approve.
   approvers: string[] | null;
+};
+
+export const DEFAULT_CHANNEL_SETTINGS: ChannelSettings = {
+  mention: { mode: "approvers" },
+  approvers: null,
 };
 
 export type CycleStore = {
@@ -55,25 +64,14 @@ export type CycleStore = {
     teamId: string;
     channelId: string;
   }): Promise<void>;
-  getChannelSettings(teamId: string, channelId: string): Promise<ChannelSettings | null>;
-  setMention(input: {
-    teamId: string;
-    channelId: string;
-    mention: string;
-    updatedBy: string;
-  }): Promise<void>;
-  setSelectedChannelMention(input: {
+  // Missing rows resolve to DEFAULT_CHANNEL_SETTINGS without inserting.
+  getChannelSettings(teamId: string, channelId: string): Promise<ChannelSettings>;
+  setSelectedChannelMentionSetting(input: {
     teamId: string;
     expectedChannelId: string;
-    mention: string;
+    mention: MentionSetting;
     updatedBy: string;
   }): Promise<boolean>;
-  setApprovers(input: {
-    teamId: string;
-    channelId: string;
-    approvers: string[] | null;
-    updatedBy: string;
-  }): Promise<void>;
   setSelectedChannelApprovers(input: {
     teamId: string;
     expectedChannelId: string;

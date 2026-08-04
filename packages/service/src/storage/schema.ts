@@ -32,7 +32,8 @@ export interface ProcessedInteractionsTable {
 export interface ChannelSettingsTable {
   team_id: string;
   channel_id: string;
-  mention: string | null;
+  mention_mode: "approvers" | "custom" | "off";
+  mention_audience: string | null;
   approvers: string | null;
   updated_by: string;
   updated_at: ColumnType<Date, string, string>;

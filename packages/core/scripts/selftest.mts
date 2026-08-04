@@ -54,8 +54,12 @@ assert.equal(
 );
 
 assert.equal(SLACK_GREETING_ACTIVE.includes("{"), false);
+assert.ok(SLACK_GREETING_ACTIVE.includes("/feature-rec help"));
 assert.equal(SLACK_NO_CHANNEL_MESSAGE.includes("{"), false);
 assert.ok(SLACK_MULTIPLE_CHANNELS_MESSAGE.includes("/feature-rec channel"));
-assert.ok(slackSelectedChannelUnavailableMessage("C0123").includes("<#C0123>"));
+assert.equal(
+  slackSelectedChannelUnavailableMessage("C0123"),
+  "Feature-Rec is not currently in the selected review channel <#C0123>. Invite @Feature-Rec back or run `/feature-rec channel #another-channel` from any workspace conversation, then re-run.",
+);
 
 console.log("core selftest passed");

@@ -57,12 +57,14 @@ Validations for every repo in a workspace go to one explicitly selected review c
 channel that `@Feature-Rec` joins is selected automatically; later joins are silent. Anyone in the
 workspace can switch the destination from any conversation or DM with
 `/feature-rec channel #channel-name`, provided the bot is in the target channel. Removing the bot
-from the selected channel does not fail over. Mentions and approver restrictions are stored per
-channel and changed for the selected channel with `/feature-rec` slash commands. Every configured
-user and every member of a configured usergroup must belong to that channel. Everything else is fixed: the
-`Feature-Rec` check name, the Slack button labels, and the PR comments posted after approval or
-rejection, which mention the PR author. See [`docs/feature-rec.md`](docs/feature-rec.md) for the
-full GitHub App, Slack App, and target repository setup.
+from the selected channel does not fail over. Mentions default to following the channel's approvers
+(`@channel` when approval is unrestricted); `/feature-rec mention` can also set a custom audience or
+turn notifications off. Approver restrictions are stored per channel and changed for the selected
+channel with `/feature-rec` slash commands. Every configured user and every member of a configured
+usergroup must belong to that channel. Everything else is fixed: the `Feature-Rec` check name, the
+Slack button labels, and the PR comments posted after approval or rejection, which mention the PR
+author. See [`docs/feature-rec.md`](docs/feature-rec.md) for the full GitHub App, Slack App, and
+target repository setup.
 
 ## Install
 

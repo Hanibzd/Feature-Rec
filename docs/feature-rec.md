@@ -46,29 +46,33 @@ channel is unavailable when a validation is ready, no Slack message is posted an
 fails with instructions to re-invite the bot or select another channel.
 
 `team_channel_routes` is the persistent routing source of truth, with one selected channel per Slack
-workspace. `channel_settings` is the source of truth for each channel's mention and approver
-configuration. Bot membership is read live from Slack for selection and availability checks; it is
-not persisted locally.
+workspace. `channel_settings` is the source of truth for each channel's mention mode, custom mention
+audience, and approver policy. A never-configured channel uses virtual defaults (follow approvers,
+unrestricted approval) without inserting a settings row. Bot membership is read live from Slack for
+selection and availability checks; it is not persisted locally.
 
 ## Slash Commands
 
 `/feature-rec` can be run from any conversation or DM in the installed workspace; every reply is
 ephemeral. Setting commands always read and update the selected review channel, not the invocation
-conversation:
+conversation. `/feature-rec` and `/feature-rec help` return the same general help. Configuration
+subcommands without arguments show the current approval/notification summary plus detailed usage.
 
 | Command | Effect |
 | --- | --- |
-| `/feature-rec channel #channel-name` | Select a public or private bot channel as the workspace review destination. The target must be an escaped Slack channel mention. Existing mention and approver settings for that channel are preserved. |
-| `/feature-rec mention @here\|@channel\|@usergroup\|@user…` | Who validation requests mention. Default `@here`; several targets are allowed. No target shows the current value. |
-| `/feature-rec approvers @channel\|@usergroup\|@user…` | Restrict who may use the approval buttons. Default: everyone in the channel. `@channel` clears the restriction. No argument shows the current list. Unauthorized clicks are answered ephemerally with "Only … can approve." |
-| `/feature-rec status` | Show the selected channel, its current availability, mention, and approvers. |
+| `/feature-rec channel #channel-name` | Select a public or private bot channel as the workspace review destination. The target must be an escaped Slack channel mention. Switching restores that channel's settings (or the virtual defaults) without copying or rewriting them. |
+| `/feature-rec mention approvers` | Mention the channel's current approvers whenever a validation is posted. This is the default. Unrestricted approval resolves to `@channel`. |
+| `/feature-rec mention off` | Post validation requests without mentioning anyone. |
+| `/feature-rec mention @here\|@channel\|@usergroup\|@user…` | Mention a custom audience, independently of later approver changes. `@channel` must be alone; `@here` may mix with users or groups. |
+| `/feature-rec approvers @channel\|@usergroup\|@user…` | Restrict who may use the approval buttons. Default: anyone in the channel. `@channel` clears the restriction. Unauthorized clicks are answered ephemerally with "Only … can approve." |
+| `/feature-rec status` | Show the selected channel, availability, and the shared approval/notification summary. |
 
 Direct users and every member returned for a selected active usergroup must belong to the selected
-channel. Disabled usergroups are excluded from Slack lookups, and empty usergroups are rejected.
-`@here` and `@channel` do not need individual membership validation. A channel switch itself does
-not revalidate or rewrite saved settings; use the mention or approvers command to repair stale
-settings after a switch. Previously stored empty mention values remain readable as `off`, but the
-command no longer creates them.
+channel when a custom mention or approver setting is saved. Disabled usergroups are excluded from
+Slack lookups, and empty usergroups are rejected. `@here` and `@channel` do not need individual
+membership validation. Membership is checked at configuration time only; later membership changes
+do not rewrite stored settings or block delivery. A channel switch itself does not revalidate or
+rewrite saved settings.
 
 ## Local Demo Backend
 
@@ -284,6 +288,7 @@ pnpm --filter @autodemo/cli exec tsx scripts/validate-selftest.mts
 
 In a staging Slack workspace, also verify that the first join gets one greeting and later joins are
 silent; switch from a DM and confirm there is one ephemeral reply and no channel-visible post;
-confirm the target channel's saved mention/approvers survive the switch; reject a mention or
-approver whose usergroup contains a non-member; and remove the selected channel to confirm delivery
-fails without moving to another membership, then re-invite it and confirm delivery resumes.
+confirm each channel's mention mode and approvers survive the switch; exercise `mention approvers`,
+`mention off`, and a custom audience; reject a mention or approver whose usergroup contains a
+non-member; and remove the selected channel to confirm delivery fails without moving to another
+membership, then re-invite it and confirm delivery resumes.

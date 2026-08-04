@@ -90,14 +90,14 @@ export const GITHUB_ACCEPT_COMMENT = "@{pr_author} validation passed, you can me
 export const GITHUB_REJECT_COMMENT = "@{pr_author} make the following changes:\n\n{review_comment}";
 
 export const SLACK_GREETING_ACTIVE =
-  "Connected, validation requests will appear in this channel.";
+  "Connected. Use `/feature-rec channel`, `mention`, `approvers`, or `status` — see `/feature-rec help`.";
 export const SLACK_NO_CHANNEL_MESSAGE =
   "Invite @Feature-Rec to your Slack review channel, then re-run.";
 export const SLACK_MULTIPLE_CHANNELS_MESSAGE =
   "Feature-Rec is present in multiple channels. Run `/feature-rec channel #channel-name` to choose where videos should be sent.";
 
 export function slackSelectedChannelUnavailableMessage(channelId: string): string {
-  return `The selected Feature-Rec channel <#${channelId}> is unavailable. Invite @Feature-Rec back or run \`/feature-rec channel #another-channel\` from any workspace conversation, then re-run.`;
+  return `Feature-Rec is not currently in the selected review channel <#${channelId}>. Invite @Feature-Rec back or run \`/feature-rec channel #another-channel\` from any workspace conversation, then re-run.`;
 }
 
 export function renderTemplate(template: string, values: Record<string, string>): string {
