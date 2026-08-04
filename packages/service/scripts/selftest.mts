@@ -1622,7 +1622,8 @@ try {
     assert.equal(slack.postMessageCalls.length, 0);
     const channelStatus = (await run("channel")).body.text ?? "";
     assert.ok(channelStatus.includes("Selected review channel: <#CCMD> (available)."));
-    assert.ok(channelStatus.includes(defaultSummary));
+    assert.equal(channelStatus.includes("Approvers:"), false);
+    assert.equal(channelStatus.includes("Notifications:"), false);
     assert.ok(channelStatus.includes("Usage: `/feature-rec channel #channel-name`"));
     assert.ok((await run("channel #reviews")).body.text?.includes("Usage: `/feature-rec channel"));
     assert.ok(
@@ -1671,7 +1672,8 @@ try {
 
     const mentionHelp = (await run("mention")).body.text ?? "";
     assert.ok(mentionHelp.includes(`For <#CCMD>:`));
-    assert.ok(mentionHelp.includes(defaultSummary));
+    assert.ok(mentionHelp.includes("Notifications: following approvers — @channel"));
+    assert.equal(mentionHelp.includes("Approvers:"), false);
     assert.ok(mentionHelp.includes("`/feature-rec mention approvers`"));
 
     const set = await run("mention @product-team <@U111|bob>");
@@ -1756,7 +1758,8 @@ try {
     );
 
     const approversHelp = (await run("approvers")).body.text ?? "";
-    assert.ok(approversHelp.includes(defaultSummary));
+    assert.ok(approversHelp.includes("Approvers: anyone in the channel"));
+    assert.equal(approversHelp.includes("Notifications:"), false);
     assert.ok(approversHelp.includes("Usage: `/feature-rec approvers"));
     const setApprovers = await run("approvers @product-team <@U111|bob>");
     assert.ok(
@@ -1811,25 +1814,13 @@ try {
     assert.ok(unavailableStatus.endsWith(slackSelectedChannelUnavailableMessage("CCMD")));
     // Reads still show current settings/help when the selected channel is gone.
     const unavailableMention = (await run("mention")).body.text ?? "";
-    assert.ok(
-      unavailableMention.startsWith(
-        [
-          "For <#CCMD>:",
-          "Approvers: anyone in the channel",
-          "Notifications: off",
-        ].join("\n"),
-      ),
-    );
+    assert.ok(unavailableMention.startsWith(["For <#CCMD>:", "Notifications: off"].join("\n")));
     assert.ok(unavailableMention.includes("`/feature-rec mention approvers`"));
     assert.ok(unavailableMention.endsWith(slackSelectedChannelUnavailableMessage("CCMD")));
     const unavailableApprovers = (await run("approvers")).body.text ?? "";
     assert.ok(
       unavailableApprovers.startsWith(
-        [
-          "For <#CCMD>:",
-          "Approvers: anyone in the channel",
-          "Notifications: off",
-        ].join("\n"),
+        ["For <#CCMD>:", "Approvers: anyone in the channel"].join("\n"),
       ),
     );
     assert.ok(unavailableApprovers.includes("Usage: `/feature-rec approvers"));

@@ -12,7 +12,9 @@ import {
 } from "@feature-rec/core";
 import type { ServiceEnv } from "./env";
 import {
+  describeApproversLine,
   describeChannelSettings,
+  describeNotificationsLine,
   effectiveMention,
   formatApproverList,
   joinList,
@@ -679,10 +681,8 @@ export function buildServer(input: {
         return [`No review channel is selected.`, CHANNEL_HELP].join("\n");
       }
       const present = input.botChannelIds.includes(selectedChannelId);
-      const settings = await store.getChannelSettings(input.teamId, selectedChannelId);
       const lines = [
         `Selected review channel: <#${selectedChannelId}> (${present ? "available" : "unavailable"}).`,
-        describeChannelSettings(settings),
         CHANNEL_HELP,
       ];
       if (!present) lines.push(slackSelectedChannelUnavailableMessage(selectedChannelId));
@@ -755,7 +755,7 @@ export function buildServer(input: {
         return [missingSelectedChannelMessage(input.botChannelIds), MENTION_HELP].join("\n");
       }
       const settings = await store.getChannelSettings(input.teamId, channelId);
-      const lines = [`For <#${channelId}>:`, describeChannelSettings(settings), MENTION_HELP];
+      const lines = [`For <#${channelId}>:`, describeNotificationsLine(settings), MENTION_HELP];
       if (!input.botChannelIds.includes(channelId)) {
         lines.push(slackSelectedChannelUnavailableMessage(channelId));
       }
@@ -817,7 +817,7 @@ export function buildServer(input: {
         return [missingSelectedChannelMessage(input.botChannelIds), APPROVERS_HELP].join("\n");
       }
       const settings = await store.getChannelSettings(input.teamId, channelId);
-      const lines = [`For <#${channelId}>:`, describeChannelSettings(settings), APPROVERS_HELP];
+      const lines = [`For <#${channelId}>:`, describeApproversLine(settings), APPROVERS_HELP];
       if (!input.botChannelIds.includes(channelId)) {
         lines.push(slackSelectedChannelUnavailableMessage(channelId));
       }
