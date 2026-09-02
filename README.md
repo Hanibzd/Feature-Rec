@@ -49,9 +49,12 @@ The repository is a pnpm monorepo with these main pieces:
 Onboarding a repository takes three actions, with no configuration file:
 
 1. Install the Feature-Rec GitHub App on the repo.
-2. Add the workflow file (`examples/feature-rec-workflow.yaml`) with its `FEATURE_REC_API_URL`
-   variable and `FEATURE_REC_RUNNER_TOKEN`/`ANTHROPIC_API_KEY` secrets.
+2. Add the workflow file (`examples/feature-rec-workflow.yaml`) with its
+   `FEATURE_REC_RUNNER_TOKEN`/`ANTHROPIC_API_KEY` secrets.
 3. Invite `@Feature-Rec` to the Slack review channel.
+
+The action uses the hosted Feature-Rec backend by default. Self-hosted deployments override its
+optional `api-url` input.
 
 Validations for every repo in a workspace go to one explicitly selected review channel. The first
 channel that `@Feature-Rec` joins is selected automatically; later joins are silent. Anyone in the
@@ -127,8 +130,8 @@ cp .env.example .env
 pnpm feature-rec:service
 ```
 
-Expose the backend with a tunnel such as ngrok or cloudflared, then set these values in the target
-repository:
+Expose the backend with a tunnel such as ngrok or cloudflared, set these values in the target
+repository, and pass `api-url: ${{ vars.FEATURE_REC_API_URL }}` to the Feature-Rec action step:
 
 ```text
 FEATURE_REC_API_URL=https://<public-tunnel-host>
@@ -184,7 +187,7 @@ Postgres service. Configure the backend with:
 
 ```text
 DATABASE_URL=${{Postgres.DATABASE_URL}}
-FEATURE_REC_BASE_URL=https://feature-rec.example.com
+FEATURE_REC_BASE_URL=https://feature-rec-production.up.railway.app
 FEATURE_REC_RUNNER_TOKEN=<strong shared secret>
 GITHUB_APP_ID=<app id>
 GITHUB_PRIVATE_KEY=<private key>
@@ -200,7 +203,12 @@ Enable GitHub Autodeploys for the protected `main` branch, with Railway's **Wait
 The required pull-request CI check builds and smoke-tests the image before merge, then Railway builds
 and deploys the accepted commit. Configure the Slack app's interactivity, events, and slash-command
 URLs at `https://<host>/api/slack/interactivity`, `…/api/slack/events`, and `…/api/slack/commands`,
-and set the target repository's `FEATURE_REC_API_URL` to `https://<host>`.
+using `https://feature-rec-production.up.railway.app` as the current host. The action already uses
+that origin by default; only self-hosted installations set its optional `api-url` input.
+
+Before customer workflows depend on the generated Railway hostname, attach
+`api.feature-rec.com` with Railway Custom Domains and change the action default to
+`https://api.feature-rec.com`. Keep the Railway hostname serving during the transition.
 
 Before the service becomes critical, verify Railway database backups and perform a test export and
 restore. The image and environment contract are not Railway-specific: migration to another provider

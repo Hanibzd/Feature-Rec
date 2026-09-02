@@ -2,8 +2,9 @@ name: Feature-Rec
 description: Render frontend-visible PR changes and send them to Slack for validation.
 inputs:
   api-url:
-    description: Public URL for the Feature-Rec backend.
-    required: true
+    description: Public URL for a self-hosted Feature-Rec backend.
+    required: false
+    default: https://feature-rec-production.up.railway.app
 runs:
   using: composite
   steps:
