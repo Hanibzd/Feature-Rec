@@ -110,7 +110,11 @@ Application code will continue to consume standard variables only:
 
 The service will not read `RAILWAY_PUBLIC_DOMAIN`, `RAILWAY_SERVICE_ID`, or any other `RAILWAY_*` variable. Railway may be used to construct the value of `FEATURE_REC_BASE_URL` in its variable configuration, but the application sees only the provider-neutral variable.
 
-A custom domain controlled by the project is preferred before integrations are considered stable. If the first version uses a generated `*.up.railway.app` domain, record that changing providers will also require updating the Slack interactivity URL and the demo repository's `FEATURE_REC_API_URL`.
+The initial hosted action defaults to `https://feature-rec-production.up.railway.app`. Before
+customer workflows depend on that generated Railway hostname, attach `api.feature-rec.com` through
+Railway Custom Domains and update the action default to `https://api.feature-rec.com`. Keep the
+Railway hostname serving during the transition. Self-hosted deployments override the action's
+optional `api-url` input.
 
 ## Repository changes
 
@@ -214,7 +218,7 @@ Update `README.md` and `docs/feature-rec.md` with:
 - the Railway service and database setup;
 - the hosted `/health` endpoint;
 - the production Slack interactivity URL;
-- the demo repository's hosted `FEATURE_REC_API_URL`;
+- the hosted action's default API URL and the optional self-host override;
 - backup, rollback, and provider-migration notes.
 
 ## Railway provisioning
@@ -261,13 +265,13 @@ Use one strong, randomly generated value for `FEATURE_REC_RUNNER_TOKEN` and set 
 
 Do not set `PORT` manually. Railway injects it, and the existing service already listens on that value at `0.0.0.0`.
 
-Set `FEATURE_REC_BASE_URL` to the final HTTPS origin without a trailing route. Prefer:
+Set `FEATURE_REC_BASE_URL` to the current HTTPS origin without a trailing route:
 
 ```text
-https://feature-rec.example.com
+https://feature-rec-production.up.railway.app
 ```
 
-For a generated first URL, a Railway reference may be used in platform configuration:
+The equivalent Railway reference may be used in platform configuration:
 
 ```text
 https://${{RAILWAY_PUBLIC_DOMAIN}}
@@ -280,7 +284,7 @@ No application code should be changed to understand that reference.
 Generate a Railway domain or attach the custom domain. After the deployment is healthy:
 
 - set Slack's Interactivity Request URL to `https://<host>/api/slack/interactivity`;
-- set the demo repository's `FEATURE_REC_API_URL` to `https://<host>`;
+- rely on the hosted action default, or set its optional `api-url` input for a self-hosted backend;
 - set the demo repository's `FEATURE_REC_RUNNER_TOKEN` to the matching secret;
 - confirm that the GitHub App is installed with the documented Checks, pull request, issue, contents, and metadata permissions;
 - invite the Slack bot to the configured validation channel.
@@ -415,4 +419,3 @@ The portability check is simple: the image must continue to pass its smoke test 
 - [Railway Deployment Teardown](https://docs.railway.com/deployments/deployment-teardown)
 - [Node.js release schedule](https://nodejs.org/en/about/previous-releases)
 - [Official Node.js Docker image variants](https://github.com/nodejs/docker-node)
-

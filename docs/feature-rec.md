@@ -17,13 +17,14 @@ For this hackathon run, Feature-Rec intentionally ignores backend-only product c
 Three actions, no configuration file:
 
 1. Install the Feature-Rec GitHub App on the repository.
-2. Copy `examples/feature-rec-workflow.yaml` to `.github/workflows/feature-rec.yaml`, set the
-   `FEATURE_REC_API_URL` repository variable, and add the `FEATURE_REC_RUNNER_TOKEN` and
-   `ANTHROPIC_API_KEY` secrets.
+2. Copy `examples/feature-rec-workflow.yaml` to `.github/workflows/feature-rec.yaml` and add the
+   `FEATURE_REC_RUNNER_TOKEN` and `ANTHROPIC_API_KEY` secrets.
 3. Invite `@Feature-Rec` to the Slack review channel.
 
 Opening a PR with a frontend-visible change then posts the validation video and buttons in that
 channel. Legacy `.github/feature-rec-config.yaml` files are ignored; delete them at leisure.
+The action uses the hosted backend by default. Self-hosted deployments set the optional `api-url`
+action input to their own public origin.
 
 ## Channel Routing
 
@@ -91,7 +92,8 @@ Expose it:
 ngrok http 3000
 ```
 
-Set the demo repository variable:
+Set the demo repository variable and pass `api-url: ${{ vars.FEATURE_REC_API_URL }}` to the
+Feature-Rec action step:
 
 ```text
 FEATURE_REC_API_URL=https://<ngrok-host>
@@ -151,12 +153,16 @@ and 60 seconds of graceful draining for in-flight uploads and external API calls
 After the public origin is stable, configure:
 
 ```text
-FEATURE_REC_BASE_URL=https://feature-rec.example.com
-Slack Interactivity Request URL=https://feature-rec.example.com/api/slack/interactivity
-Slack Events Request URL=https://feature-rec.example.com/api/slack/events
-Slack Slash Command URL=https://feature-rec.example.com/api/slack/commands
-Target repository FEATURE_REC_API_URL=https://feature-rec.example.com
+FEATURE_REC_BASE_URL=https://feature-rec-production.up.railway.app
+Slack Interactivity Request URL=https://feature-rec-production.up.railway.app/api/slack/interactivity
+Slack Events Request URL=https://feature-rec-production.up.railway.app/api/slack/events
+Slack Slash Command URL=https://feature-rec-production.up.railway.app/api/slack/commands
+Hosted action default=https://feature-rec-production.up.railway.app
 ```
+
+This generated Railway hostname is temporary. Before customer workflows depend on it, attach
+`api.feature-rec.com` through Railway Custom Domains, change the action default to
+`https://api.feature-rec.com`, and keep the Railway hostname available during the transition.
 
 Use one strong value for `FEATURE_REC_RUNNER_TOKEN` in both Railway and the target repository. Seal
 GitHub and Slack secrets in Railway where available. The backend does not consume GitHub webhooks.

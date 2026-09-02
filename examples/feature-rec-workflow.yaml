@@ -31,8 +31,6 @@ jobs:
           fetch-depth: 0
 
       - uses: Hanibzd/Feature-Rec/packages/action@main
-        with:
-          api-url: ${{ vars.FEATURE_REC_API_URL }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           FEATURE_REC_RUNNER_TOKEN: ${{ secrets.FEATURE_REC_RUNNER_TOKEN }}
