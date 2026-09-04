@@ -11,7 +11,7 @@
     "dev": "tsx src/index.ts",
     "start": "node --enable-source-maps dist/index.js",
     "typecheck": "tsc --noEmit",
-    "selftest": "tsx scripts/selftest.mts"
+    "selftest": "tsx scripts/selftest.mts && tsx scripts/admin-selftest.mts"
   },
   "dependencies": {
     "fastify": "^5.8.5",

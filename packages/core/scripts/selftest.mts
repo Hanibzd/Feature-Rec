@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   buildCycleKey,
+  buildTenantCycleKey,
   GITHUB_ACCEPT_COMMENT,
   GITHUB_REJECT_COMMENT,
   isAllowedPullRequestEvent,
@@ -30,6 +31,15 @@ assert.equal(
     headSha: "abc1234",
   }),
   "o/r#7:abc1234",
+);
+assert.equal(
+  buildTenantCycleKey({
+    tenantId: "c647960e-af6a-42d3-a7e5-49c258fa5a11",
+    repositoryId: "9007199254740991",
+    prNumber: 7,
+    headSha: "abc1234",
+  }),
+  "c647960e-af6a-42d3-a7e5-49c258fa5a11/9007199254740991#7:abc1234",
 );
 assert.equal(
   isAllowedPullRequestEvent({

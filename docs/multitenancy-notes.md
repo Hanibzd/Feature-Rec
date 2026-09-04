@@ -69,3 +69,59 @@ For multi-workspace support the DB approach becomes necessary: store each
 installation's bot token and select it by `teamId` (`tokenForTeam()`). For one
 global token, cached `auth.test` is the right design — simpler and less
 error-prone, though not universally "better."
+
+## OIDC and multitenancy rollout review (2026-09-03)
+
+Proposed high-level order: additive schema, multitenant business logic, OIDC
+business logic, then legacy-schema deletion. The direction is correct, with
+these required safety constraints:
+
+- Multitenant GitHub routing must not become active while runner requests are
+  authorized only by the shared bearer token. A caller holding that token can
+  supply another repository's names. The OIDC-verified `repository_id` and
+  `repository_owner_id` must select the GitHub installation and tenant; a
+  request-supplied `tenant_id` must never do so.
+- Multitenancy and OIDC may be developed sequentially in one PR, but their
+  GitHub-facing cutover is one security boundary. Verify OIDC, resolve the
+  installation/tenant, check `tenants.enabled`, and prove repository access by
+  minting a repository-scoped installation token before creating a cycle.
+- Bind every runner endpoint, not only `/api/runs/start`, to the authenticated
+  cycle tenant and repository. The action should request a fresh OIDC token for
+  calls made after long rendering work rather than assume the start token is
+  still valid.
+- Add `review_cycles.tenant_id` and `repository_id` as nullable first. Backfill
+  and validate them before changing application reads or adding `NOT NULL`.
+  Decide explicitly how unresolvable historical repositories are archived or
+  removed; they must not silently block the constraint migration.
+- Backfill the singleton tenant, Slack workspace/token/channel, GitHub
+  installation/account, repository IDs, and cycle keys before enabling strict
+  multitenant reads. Token encryption belongs in application code or a one-off
+  script, not in SQL.
+- Prevent drift during the interval between channel-route backfill and cutover:
+  either briefly stop writes or dual-write `selected_channel_id` and perform a
+  final reconciliation before dropping `team_channel_routes`.
+- Switch cycle-key construction, the unique lookup, advisory-lock scope, and
+  supersession queries together to `tenant_id + repository_id`. Mixed old/new
+  service instances would use different locks and can create competing active
+  cycles, so use a non-rolling/maintenance cutover or a compatible transition
+  protocol.
+- Do not ship the destructive migration in the same automatically applied
+  migration wave as the additive migration. `PostgresCycleStore.init()` calls
+  `migrateToLatest()`, so every migration present in one deployed artifact is
+  applied before that process serves traffic, potentially while old instances
+  still read the removed columns/table. Use a later contract deployment (a
+  second PR is simplest), unless accepting downtime and loss of rollback.
+- Remove `FEATURE_REC_RUNNER_TOKEN`, the shared Slack token, `owner`/`repo`,
+  `config_hash`, `config_json`, and `team_channel_routes` only after production
+  traffic proves there are no remaining readers/writers and a final backfill
+  validation passes.
+
+Safe deployment order:
+
+1. Add nullable/new schema and compatibility code.
+2. Backfill and validate all tenant/integration/repository data.
+3. Add multitenant plumbing without exposing GitHub routing under legacy auth.
+4. Add OIDC plus installation authorization and cut the action/backend over as
+   one release; switch cycle identity, locks, and supersession atomically.
+5. Observe and reconcile; enforce the new non-null invariants.
+6. In a later contract deployment, remove legacy columns, tables, and secrets.

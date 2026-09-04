@@ -6,6 +6,12 @@ import { PostgresCycleStore } from "./storage/postgres";
 const env = readEnv();
 const store = new PostgresCycleStore(env.databaseUrl);
 await store.init();
+if ((await store.hasSlackWorkspaces()) && !env.slackTokenEncryptionKey) {
+  await store.close();
+  throw new Error(
+    "FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY is required when Slack workspace rows exist",
+  );
+}
 const server = buildServer({ env, store });
 
 const close = async () => {

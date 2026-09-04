@@ -125,6 +125,8 @@ The runtime contract is:
 | `FEATURE_REC_GITHUB_TOKEN` | Optional | Local/demo fallback for GitHub authentication |
 | `SLACK_BOT_TOKEN` | Required for Slack review | Slack Web API authentication |
 | `SLACK_SIGNING_SECRET` | Required for Slack review | Slack interaction, event, and command verification |
+| `FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY` | Required after multitenancy backfill | Exactly 32 random bytes encoded as base64; encrypts persisted Slack bot tokens |
+| `GITHUB_OIDC_ISSUER` | Optional preparation seam | Valid HTTPS issuer URL; defaults to GitHub Actions and becomes active in deploy B |
 
 Configuration is injected at runtime. Do not put secrets in the Dockerfile or image. The backend
 uses no persistent filesystem or container volume; review state and channel routing are stored in
@@ -173,6 +175,36 @@ Railway runs PostgreSQL separately from the stateless backend. Verify the databa
 policy, then perform at least one `pg_dump`/`pg_restore` drill before the state becomes critical.
 Application rollback redeploys the previous healthy image; schema migrations must remain backward
 compatible because automatic down migrations are not used.
+
+Migration `0008_multitenant_expand` adds only nullable/new schema and relaxes the legacy repository
+name columns. It retains `team_channel_routes`, prefers a populated
+`slack_workspaces.selected_channel_id`, and dual-writes both fields. Its `down()` refuses to proceed
+if any cycle lacks the legacy `owner`/`repo` values needed by deploy A.
+
+The image includes the compiled `node dist/admin.js` control plane; it does not depend on `tsx` or
+development dependencies. Production commands require an explicit `--environment` label, and every
+write requires `--confirm`. Run them inside Railway's private network:
+
+```bash
+railway ssh -- node dist/admin.js migration-status --environment production
+railway ssh -- node dist/admin.js backfill-multitenancy --environment production --dry-run
+railway ssh -- node dist/admin.js backfill-multitenancy --environment production --apply --confirm
+railway ssh -- node dist/admin.js validate-contract-readiness --environment production
+```
+
+Generate `FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY` once with `openssl rand -base64 32`, seal it in
+the hosted environment, and keep it stable. Backfill validates the legacy Slack team, resolves every
+legacy repository through the GitHub App, detects future cycle-key collisions, writes one disabled
+tenant transactionally, and enables it only after validation. Deploy A still uses shared runner
+authentication, so do not provision a second tenant yet.
+
+For the final pre-cutover reconciliation, pause new workflows and drain active runs, then use
+`backfill-multitenancy --apply --confirm --rebuild-cycle-keys --traffic-paused`. To roll the database
+back to the pre-A schema, first run
+`migrate-to 0007_mention_modes --expect-current 0008_multitenant_expand --confirm` from the deploy-A
+artifact, verify the status, and only then start the older image. If the normal image cannot become
+healthy, run the retained artifact against a private `railway connect postgres --tunnel-only`
+connection; do not make PostgreSQL public.
 
 Migration `0006_drop_legacy_bot_channels` permanently removes the obsolete membership snapshot after
 explicit routing has completed its observation window. Before deploying it, verify every expected

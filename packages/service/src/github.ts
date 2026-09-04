@@ -21,6 +21,19 @@ type IssueComment = {
   html_url: string;
 };
 
+export type GitHubInstallation = {
+  installationId: string;
+  githubAccountId: string;
+};
+
+export type GitHubRepositoryIdentity = GitHubInstallation & {
+  repositoryId: string;
+  repositoryOwnerId: string;
+  owner: string;
+  repo: string;
+  fullName: string;
+};
+
 function b64url(input: string | Buffer): string {
   return Buffer.from(input)
     .toString("base64")
@@ -45,6 +58,22 @@ function appJwt(env: ServiceEnv): string {
   const data = `${header}.${payload}`;
   const signature = crypto.createSign("RSA-SHA256").update(data).sign(env.githubPrivateKey);
   return `${data}.${b64url(signature)}`;
+}
+
+function decimalId(value: unknown, label: string): string {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`GitHub returned an invalid ${label}`);
+  }
+  return String(value);
+}
+
+function safeIdNumber(value: string, label: string): number {
+  if (!/^[1-9][0-9]*$/.test(value)) throw new Error(`${label} must be a positive decimal string`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || String(parsed) !== value) {
+    throw new Error(`${label} cannot be represented exactly as a JavaScript number`);
+  }
+  return parsed;
 }
 
 async function githubFetch<T>(
@@ -78,6 +107,86 @@ export class GitHubClient {
 
   constructor(env: ServiceEnv) {
     this.#env = env;
+  }
+
+  async inspectInstallation(installationId: string): Promise<GitHubInstallation> {
+    const requestedId = safeIdNumber(installationId, "GitHub installation ID");
+    const installation = await githubFetch<{ id: number; account?: { id?: number } }>(
+      `/app/installations/${requestedId}`,
+      { token: appJwt(this.#env) },
+    );
+    const returnedId = decimalId(installation.id, "installation ID");
+    if (returnedId !== installationId) {
+      throw new Error("GitHub returned a different installation ID");
+    }
+    return {
+      installationId: returnedId,
+      githubAccountId: decimalId(installation.account?.id, "installation account ID"),
+    };
+  }
+
+  async resolveRepository(owner: string, repo: string): Promise<GitHubRepositoryIdentity> {
+    const encodedOwner = encodeURIComponent(owner);
+    const encodedRepo = encodeURIComponent(repo);
+    const jwt = appJwt(this.#env);
+    const installation = await githubFetch<{ id: number; account?: { id?: number } }>(
+      `/repos/${encodedOwner}/${encodedRepo}/installation`,
+      { token: jwt },
+    );
+    const installationId = decimalId(installation.id, "installation ID");
+    const githubAccountId = decimalId(installation.account?.id, "installation account ID");
+    const access = await githubFetch<{ token: string }>(
+      `/app/installations/${installationId}/access_tokens`,
+      { token: jwt, method: "POST", body: {} },
+    );
+    const repository = await githubFetch<{
+      id: number;
+      name: string;
+      full_name: string;
+      owner?: { id?: number; login?: string };
+    }>(`/repos/${encodedOwner}/${encodedRepo}`, { token: access.token });
+    const repositoryOwnerId = decimalId(repository.owner?.id, "repository owner ID");
+    if (repositoryOwnerId !== githubAccountId) {
+      throw new Error("GitHub repository owner does not match the installation account");
+    }
+    return {
+      installationId,
+      githubAccountId,
+      repositoryId: decimalId(repository.id, "repository ID"),
+      repositoryOwnerId,
+      owner: repository.owner?.login ?? owner,
+      repo: repository.name,
+      fullName: repository.full_name,
+    };
+  }
+
+  async inspectInstallationRepository(
+    installationId: string,
+    owner: string,
+    repo: string,
+  ): Promise<GitHubRepositoryIdentity> {
+    const installation = await this.inspectInstallation(installationId);
+    const repository = await this.resolveRepository(owner, repo);
+    if (
+      repository.installationId !== installation.installationId ||
+      repository.githubAccountId !== installation.githubAccountId
+    ) {
+      throw new Error("The selected repository does not belong to the requested installation");
+    }
+
+    // End-to-end check that the app can mint a token restricted to this exact
+    // repository. The token remains opaque and is never returned or logged.
+    await githubFetch<{ token: string }>(
+      `/app/installations/${installation.installationId}/access_tokens`,
+      {
+        token: appJwt(this.#env),
+        method: "POST",
+        body: {
+          repository_ids: [safeIdNumber(repository.repositoryId, "GitHub repository ID")],
+        },
+      },
+    );
+    return repository;
   }
 
   async tokenForRepo(owner: string, repo: string): Promise<string> {

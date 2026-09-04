@@ -4,8 +4,14 @@ import type { ReviewCycleStatus } from "@feature-rec/core";
 export interface ReviewCyclesTable {
   id: string;
   cycle_key: string;
-  owner: string;
-  repo: string;
+  owner: string | null;
+  repo: string | null;
+  tenant_id: ColumnType<string | null, string | null | undefined, string | null>;
+  repository_id: ColumnType<
+    string | null,
+    string | number | null | undefined,
+    string | number | null
+  >;
   pr_number: number;
   pr_author: string;
   pr_title: string;
@@ -44,9 +50,31 @@ export interface TeamChannelRoutesTable {
   selected_channel_id: string;
 }
 
+export interface TenantsTable {
+  id: string;
+  enabled: ColumnType<boolean, boolean | undefined, boolean>;
+}
+
+export interface SlackWorkspacesTable {
+  team_id: string;
+  tenant_id: string;
+  bot_user_id: string;
+  bot_token_ciphertext: string;
+  selected_channel_id: string | null;
+}
+
+export interface GitHubInstallationsTable {
+  installation_id: ColumnType<string, string | number, string | number>;
+  tenant_id: string;
+  github_account_id: ColumnType<string, string | number, string | number>;
+}
+
 export interface DB {
   review_cycles: ReviewCyclesTable;
   processed_interactions: ProcessedInteractionsTable;
   channel_settings: ChannelSettingsTable;
   team_channel_routes: TeamChannelRoutesTable;
+  tenants: TenantsTable;
+  slack_workspaces: SlackWorkspacesTable;
+  github_installations: GitHubInstallationsTable;
 }

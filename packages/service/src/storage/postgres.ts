@@ -29,6 +29,11 @@ function now(): string {
 }
 
 function rowToCycle(row: Selectable<ReviewCyclesTable>): CycleRecord {
+  if (row.owner === null || row.repo === null) {
+    throw new Error(
+      `Review cycle ${row.id} has no repository coordinates required by the compatibility runtime`,
+    );
+  }
   return {
     id: row.id,
     cycleKey: row.cycle_key,
@@ -63,6 +68,11 @@ export class PostgresCycleStore implements CycleStore {
     if (error) {
       throw error instanceof Error ? error : new Error(`Migration failed: ${String(error)}`);
     }
+  }
+
+  async hasSlackWorkspaces(): Promise<boolean> {
+    const row = await this.#db.selectFrom("slack_workspaces").select("team_id").limit(1).executeTakeFirst();
+    return row !== undefined;
   }
 
   async startCycle(input: RunStartRequest & { cycleKey: string }): Promise<StartCycleResult> {
@@ -245,9 +255,16 @@ export class PostgresCycleStore implements CycleStore {
 
   async getSelectedChannelId(teamId: string): Promise<string | null> {
     const row = await this.#db
-      .selectFrom("team_channel_routes")
-      .select("selected_channel_id")
-      .where("team_id", "=", teamId)
+      .selectFrom("team_channel_routes as route")
+      .fullJoin("slack_workspaces as workspace", "workspace.team_id", "route.team_id")
+      .select((eb) =>
+        eb.fn
+          .coalesce("workspace.selected_channel_id", "route.selected_channel_id")
+          .as("selected_channel_id"),
+      )
+      .where((eb) =>
+        eb.or([eb("route.team_id", "=", teamId), eb("workspace.team_id", "=", teamId)]),
+      )
       .executeTakeFirst();
     return row?.selected_channel_id ?? null;
   }
@@ -264,6 +281,16 @@ export class PostgresCycleStore implements CycleStore {
         .values({ team_id: input.teamId, selected_channel_id: input.channelId })
         .onConflict((oc) => oc.column("team_id").doNothing())
         .executeTakeFirst();
+      const route = await trx
+        .selectFrom("team_channel_routes")
+        .select("selected_channel_id")
+        .where("team_id", "=", input.teamId)
+        .executeTakeFirstOrThrow();
+      await trx
+        .updateTable("slack_workspaces")
+        .set({ selected_channel_id: route.selected_channel_id })
+        .where("team_id", "=", input.teamId)
+        .execute();
       return { initializedRoute: (result.numInsertedOrUpdatedRows ?? 0n) > 0n };
     });
   }
@@ -284,6 +311,11 @@ export class PostgresCycleStore implements CycleStore {
         .onConflict((oc) =>
           oc.column("team_id").doUpdateSet({ selected_channel_id: input.channelId }),
         )
+        .execute();
+      await trx
+        .updateTable("slack_workspaces")
+        .set({ selected_channel_id: input.channelId })
+        .where("team_id", "=", input.teamId)
         .execute();
     });
   }
@@ -415,9 +447,19 @@ export class PostgresCycleStore implements CycleStore {
       const lockKey = `team-route:${input.teamId}`;
       await sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`.execute(trx);
       const route = await trx
-        .selectFrom("team_channel_routes")
-        .select("selected_channel_id")
-        .where("team_id", "=", input.teamId)
+        .selectFrom("team_channel_routes as legacy")
+        .fullJoin("slack_workspaces as workspace", "workspace.team_id", "legacy.team_id")
+        .select((eb) =>
+          eb.fn
+            .coalesce("workspace.selected_channel_id", "legacy.selected_channel_id")
+            .as("selected_channel_id"),
+        )
+        .where((eb) =>
+          eb.or([
+            eb("legacy.team_id", "=", input.teamId),
+            eb("workspace.team_id", "=", input.teamId),
+          ]),
+        )
         .executeTakeFirst();
       if (route?.selected_channel_id !== input.expectedChannelId) return false;
       await this.#upsertChannelSettings(
