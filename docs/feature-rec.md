@@ -125,6 +125,8 @@ The runtime contract is:
 | `FEATURE_REC_GITHUB_TOKEN` | Optional | Local/demo fallback for GitHub authentication |
 | `SLACK_BOT_TOKEN` | Required for Slack review | Slack Web API authentication |
 | `SLACK_SIGNING_SECRET` | Required for Slack review | Slack interaction, event, and command verification |
+| `FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY` | Required after multitenancy backfill | Exactly 32 random bytes encoded as base64; encrypts persisted Slack bot tokens |
+| `GITHUB_OIDC_ISSUER` | Optional preparation seam | Valid HTTPS issuer URL; defaults to GitHub Actions and becomes active in deploy B |
 
 Configuration is injected at runtime. Do not put secrets in the Dockerfile or image. The backend
 uses no persistent filesystem or container volume; review state and channel routing are stored in
@@ -173,6 +175,61 @@ Railway runs PostgreSQL separately from the stateless backend. Verify the databa
 policy, then perform at least one `pg_dump`/`pg_restore` drill before the state becomes critical.
 Application rollback redeploys the previous healthy image; schema migrations must remain backward
 compatible because automatic down migrations are not used.
+
+Migration `0008_multitenant_expand` adds only nullable/new schema and relaxes the legacy repository
+name columns. It retains `team_channel_routes`, prefers a populated
+`slack_workspaces.selected_channel_id`, and dual-writes both fields. Its `down()` refuses to proceed
+if any cycle lacks the legacy `owner`/`repo` values needed by deploy A.
+
+The image includes the compiled `node dist/admin.js` control plane; it does not depend on `tsx` or
+development dependencies. Production commands require an explicit `--environment` label, and every
+write requires `--confirm`. Run them inside Railway's private network:
+
+```bash
+railway ssh -- node dist/admin.js migration-status --environment production
+railway ssh -- node dist/admin.js backfill-multitenancy --environment production --dry-run
+railway ssh -- node dist/admin.js backfill-multitenancy --environment production --apply --confirm
+railway ssh -- node dist/admin.js validate-contract-readiness --environment production
+```
+
+Generate `FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY` once with `openssl rand -base64 32`, seal it in
+the hosted environment, and keep it stable. Backfill validates the legacy Slack team, resolves every
+legacy repository through the GitHub App, detects future cycle-key collisions, writes one disabled
+tenant transactionally, and enables it only after validation. Deploy A still uses shared runner
+authentication, so do not provision a second tenant yet.
+
+The first successful backfill/provisioning transaction stores an independent HMAC-SHA256 key verifier
+in the singleton `slack_token_encryption_key` table; subsequent writes and startup must match it.
+Startup decrypt-checks stored tokens after checking that verifier. A wrong/missing key or missing
+verifier prevents startup; one corrupt token produces an error with the tenant/workspace IDs and
+event `SLACK_TOKEN_DECRYPTION_FAILED`, without blocking other tenants. Investigate that alert and
+repair/re-provision the affected credentials; readiness validation continues to fail until repaired.
+Neither tokens nor ciphertexts are logged. Back up the verifier with the database and the key
+separately. Never delete the verifier to bypass a key mismatch; restore the matching backup/key.
+
+The verifier table is part of the still-unreleased `0008` migration. Disposable development databases
+that already ran an earlier version of this PR must be recreated, or deliberately rolled back/reapplied
+with backups; startup does not silently rewrite an already-executed migration.
+
+For the final pre-cutover reconciliation, pause new workflows and drain active runs, then use
+`backfill-multitenancy --apply --confirm --rebuild-cycle-keys --traffic-paused`. To roll the database
+back to the pre-expansion schema:
+
+1. Pause runner and Slack writes, drain active requests, and verify a fresh database backup and the
+   retained older release. Disable automatic deploys and stop all current service instances using
+   the platform's deployment controls; killing a process is not enough with an always-restart policy.
+2. From a **separate maintenance process**, run the retained newer admin artifact against the private
+   database (for example via a private `railway connect postgres --tunnel-only` connection). Do not
+   use `railway ssh` inside the still-running service for a schema downgrade. Check migration status.
+3. Run `node dist/admin.js migrate-to 0007_mention_modes --environment production --expect-current
+   0008_multitenant_expand --service-stopped --traffic-paused --confirm`. These flags acknowledge
+   actual operator actions; they do not stop Railway for you. The expected-current check and migration
+   are serialized with startup migrations, but a later service restart would reapply `0008`.
+4. Verify migration status, start only the pinned older image, check `/health` and an existing review
+   flow, then resume traffic. Restore autodeploys only once their target is safe for the chosen schema.
+
+Do not expose PostgreSQL publicly or hand-edit Kysely's migration records. Downgrading `0008` removes
+tenant integrations and the key verifier; retain the backup for recovery.
 
 Migration `0006_drop_legacy_bot_channels` permanently removes the obsolete membership snapshot after
 explicit routing has completed its observation window. Before deploying it, verify every expected

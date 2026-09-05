@@ -57,11 +57,17 @@ jobs:
       - name: Build service image
         run: docker build --tag feature-rec-service:ci .
 
+      - name: Smoke test compiled admin command
+        run: docker run --rm --entrypoint node feature-rec-service:ci dist/admin.js --help
+
       - name: Smoke test service image
         run: |
           docker run --detach --name feature-rec-service-ci --network host \
             --env DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres \
+            --env FEATURE_REC_BASE_URL=http://127.0.0.1:3000 \
             --env FEATURE_REC_RUNNER_TOKEN=ci-smoke-test \
+            --env FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= \
+            --env GITHUB_OIDC_ISSUER=https://token.actions.githubusercontent.com \
             feature-rec-service:ci
 
           for attempt in {1..30}; do

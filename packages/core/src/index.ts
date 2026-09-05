@@ -75,6 +75,18 @@ export function buildCycleKey(input: {
   return `${input.owner}/${input.repo}#${input.prNumber}:${input.headSha}`;
 }
 
+// Keep the singleton identity during the compatibility window while exposing
+// the multitenant identity to backfill and validation tooling. The action and
+// service must switch to this builder together.
+export function buildTenantCycleKey(input: {
+  tenantId: string;
+  repositoryId: string;
+  prNumber: number;
+  headSha: string;
+}): string {
+  return `${input.tenantId}/${input.repositoryId}#${input.prNumber}:${input.headSha}`;
+}
+
 export function isAllowedPullRequestEvent(event: {
   action?: string;
   pull_request?: { state?: string; draft?: boolean };

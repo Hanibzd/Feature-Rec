@@ -12,10 +12,15 @@ import {
   type RunStartRequest,
 } from "@feature-rec/core";
 import { ChannelResolutionError, resolveChannel } from "../src/channels";
-import { GitHubClient } from "../src/github";
-import type { ServiceEnv } from "../src/env";
+import { GitHubClient, GitHubRequestError } from "../src/github";
+import { readEnv, type ServiceEnv } from "../src/env";
 import { buildServer } from "../src/http";
 import { SlackClient, verifySlackSignature } from "../src/slack";
+import {
+  decryptSlackToken,
+  encryptSlackToken,
+  parseSlackTokenEncryptionKey,
+} from "../src/slack-token-crypto";
 import { PostgresCycleStore } from "../src/storage/postgres";
 import { migrationProvider } from "../src/storage/migrations";
 import type { DB } from "../src/storage/schema";
@@ -52,6 +57,8 @@ const env: ServiceEnv = {
   githubPrivateKey: "",
   slackBotToken: "",
   slackSigningSecret: "slack-secret",
+  slackTokenEncryptionKey: null,
+  githubOidcIssuer: "https://token.actions.githubusercontent.com",
 };
 
 const RUNNER_AUTH = `Bearer ${env.runnerToken}`;
@@ -411,7 +418,43 @@ const store = new PostgresCycleStore(testUrl);
 await store.init();
 
 try {
-  // --- Migration 0005–0007: routes, drop memberships, mention modes ---
+  // --- Authentication configuration and Slack token envelope ---
+  {
+    const key = Buffer.alloc(32, 7);
+    const encodedKey = key.toString("base64");
+    assert.deepEqual(parseSlackTokenEncryptionKey(encodedKey), key);
+    assert.equal(parseSlackTokenEncryptionKey(undefined), null);
+    assert.throws(() => parseSlackTokenEncryptionKey(Buffer.alloc(31).toString("base64")), /32 bytes/);
+    assert.throws(() => parseSlackTokenEncryptionKey(`${encodedKey}\n`), /canonical base64/);
+
+    const envelope = encryptSlackToken({
+      token: "xoxb-secret",
+      teamId: "TCRYPT",
+      key,
+      iv: Buffer.alloc(12, 3),
+    });
+    assert.match(envelope, /^v1:[^:]+:[^:]+:[^:]+$/);
+    assert.equal(decryptSlackToken({ envelope, teamId: "TCRYPT", key }), "xoxb-secret");
+    assert.throws(
+      () => decryptSlackToken({ envelope, teamId: "TOTHER", key }),
+      /authenticate data|Unsupported state/i,
+    );
+    const tampered = `${envelope.slice(0, -1)}${envelope.endsWith("A") ? "B" : "A"}`;
+    assert.throws(() => decryptSlackToken({ envelope: tampered, teamId: "TCRYPT", key }));
+
+    const parsed = readEnv({
+      DATABASE_URL: testUrl,
+      FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY: encodedKey,
+    });
+    assert.deepEqual(parsed.slackTokenEncryptionKey, key);
+    assert.equal(parsed.githubOidcIssuer, "https://token.actions.githubusercontent.com");
+    assert.throws(
+      () => readEnv({ DATABASE_URL: testUrl, GITHUB_OIDC_ISSUER: "http://issuer.example" }),
+      /HTTPS URL/,
+    );
+  }
+
+  // --- Migration 0005–0008: routes, mention modes, multitenant expand ---
   {
     const migrationDbName = `${dbName}_migration`;
     const migrationAdmin = new Client({ connectionString: adminUrl });
@@ -513,6 +556,60 @@ try {
       ]);
       assert.equal(await legacyTableName(), null);
 
+      const expandedTables = await sql<{ table_name: string }>`
+        select table_name
+        from information_schema.tables
+        where table_schema = 'public'
+          and table_name in ('tenants', 'slack_workspaces', 'github_installations')
+        order by table_name
+      `.execute(migrationDb);
+      assert.deepEqual(expandedTables.rows.map((row) => row.table_name), [
+        "github_installations",
+        "slack_workspaces",
+        "tenants",
+      ]);
+      const expandedColumns = await sql<{
+        column_name: string;
+        is_nullable: string;
+        data_type: string;
+      }>`
+        select column_name, is_nullable, data_type
+        from information_schema.columns
+        where table_name = 'review_cycles'
+          and column_name in ('owner', 'repo', 'tenant_id', 'repository_id')
+        order by column_name
+      `.execute(migrationDb);
+      assert.deepEqual(expandedColumns.rows, [
+        { column_name: "owner", is_nullable: "YES", data_type: "text" },
+        { column_name: "repo", is_nullable: "YES", data_type: "text" },
+        { column_name: "repository_id", is_nullable: "YES", data_type: "bigint" },
+        { column_name: "tenant_id", is_nullable: "YES", data_type: "uuid" },
+      ]);
+      assert.equal(
+        await sql<{ exists: boolean }>`
+          select exists (
+            select 1 from pg_indexes
+            where tablename = 'review_cycles'
+              and indexname = 'review_cycles_tenant_repo_pr_idx'
+          ) as exists
+        `.execute(migrationDb).then((result) => result.rows[0]?.exists),
+        true,
+      );
+
+      // A binary whose static provider ends at 0007 refuses a DB that records
+      // 0008. Rollback must migrate down with the newer artifact first.
+      const allMigrations = await migrationProvider.getMigrations();
+      const olderProvider = {
+        getMigrations: async () =>
+          Object.fromEntries(Object.entries(allMigrations).filter(([name]) => name <= "0007_mention_modes")),
+      };
+      const olderResult = await new Migrator({
+        db: migrationDb,
+        provider: olderProvider,
+      }).migrateToLatest();
+      assert.ok(olderResult.error);
+      assert.match(String(olderResult.error), /previously executed migration 0008_multitenant_expand is missing/i);
+
       // Constraint coverage for the new mention-mode shape.
       const constraintClient = new Client({ connectionString: migrationUrl });
       await constraintClient.connect();
@@ -565,7 +662,32 @@ try {
       );
       await constraintClient.end();
 
-      // One down from latest reverts 0007 (schema only), not 0006.
+      // 0008.down() refuses to make legacy names non-null when a newer row
+      // cannot be represented by the compatibility runtime.
+      await sql`
+        insert into review_cycles
+          (id, cycle_key, owner, repo, pr_number, pr_author, pr_title, head_sha,
+           status, attempt_id, created_at, updated_at)
+        values
+          ('down-blocker', 'future/key#1:abcdefg', null, null, 1, '', '',
+           'abcdefg', 'failed', 'attempt', '2026-01-01', '2026-01-01')
+      `.execute(migrationDb);
+      const blockedExpandDown = await migrator.migrateDown();
+      assert.ok(blockedExpandDown.error);
+      assert.match(String(blockedExpandDown.error), /owner\/repo contain null values/);
+      await sql`delete from review_cycles where id = 'down-blocker'`.execute(migrationDb);
+
+      // One successful down from latest removes only the additive 0008 schema.
+      const downExpand = await migrator.migrateDown();
+      if (downExpand.error) throw downExpand.error;
+      assert.equal(
+        await sql<{ relation: string | null }>`select to_regclass('public.tenants')::text as relation`
+          .execute(migrationDb)
+          .then((result) => result.rows[0]?.relation ?? null),
+        null,
+      );
+
+      // The next down reverts 0007 (schema only), not 0006.
       const downMention = await migrator.migrateDown();
       if (downMention.error) throw downMention.error;
       assert.equal(await legacyTableName(), null);
@@ -601,7 +723,7 @@ try {
         false,
       );
 
-      // A second down recreates only the empty legacy bot_channels shape.
+      // The next down recreates only the empty legacy bot_channels shape.
       const downLegacy = await migrator.migrateDown();
       if (downLegacy.error) throw downLegacy.error;
       assert.equal(await legacyTableName(), "bot_channels");
@@ -709,6 +831,80 @@ try {
       (githubCalls[3].body.output as { summary: string }).summary.includes("issuecomment-9"),
       true,
     );
+  }
+
+  // --- GitHub App provisioning inspection scopes a repository token ---
+  {
+    const previousFetch = globalThis.fetch;
+    const { privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const calls: Array<{ url: string; body: unknown }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const urlText = String(url);
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ url: urlText, body });
+      let json: unknown;
+      if (urlText.endsWith("/app/installations/501")) {
+        json = { id: 501, account: { id: 601 } };
+      } else if (urlText.endsWith("/repos/Acme/One/installation")) {
+        json = { id: 501, account: { id: 601 } };
+      } else if (urlText.endsWith("/repos/Acme/One")) {
+        json = {
+          id: 101,
+          name: "One",
+          full_name: "Acme/One",
+          owner: { id: 601, login: "Acme" },
+        };
+      } else {
+        json = { token: "opaque-installation-token" };
+      }
+      return new Response(JSON.stringify(json), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      const client = new GitHubClient({
+        ...env,
+        githubAppId: "123",
+        githubPrivateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      });
+      assert.deepEqual(await client.inspectInstallationRepository("501", "Acme", "One"), {
+        installationId: "501",
+        githubAccountId: "601",
+        repositoryId: "101",
+        repositoryOwnerId: "601",
+        owner: "Acme",
+        repo: "One",
+        fullName: "Acme/One",
+      });
+      for (const [status, headers, retryable] of [
+        [503, {}, true], [404, {}, false], [403, {}, false],
+        [403, { "x-ratelimit-remaining": "0" }, true], [429, {}, true],
+      ] as const) {
+        globalThis.fetch = async () => new Response("secret-response-body", { status, headers });
+        await assert.rejects(client.resolveRepository("Acme", "One"), (error: unknown) => {
+          assert.ok(error instanceof GitHubRequestError);
+          assert.equal(error.status, status);
+          assert.equal(error.retryable, retryable);
+          assert.ok(!error.message.includes("secret-response-body"));
+          return true;
+        });
+      }
+      globalThis.fetch = async () => { throw new Error("secret-network-diagnostic"); };
+      await assert.rejects(client.resolveRepository("Acme", "One"), (error: unknown) => {
+        assert.ok(error instanceof GitHubRequestError);
+        assert.equal(error.status, null);
+        assert.equal(error.retryable, true);
+        assert.ok(!error.message.includes("secret-network-diagnostic"));
+        return true;
+      });
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+    const accessTokenCalls = calls.filter((call) => call.url.endsWith("/access_tokens"));
+    assert.equal(accessTokenCalls.length, 2);
+    assert.deepEqual(accessTokenCalls[0].body, {});
+    assert.deepEqual(accessTokenCalls[1].body, { repository_ids: [101] });
   }
 
   // --- verifySlackSignature rejects bad input ---
@@ -1110,6 +1306,17 @@ try {
 
     const slack = makeSlackStub({ teamId: "TROUTE", channels: [] });
     const slackClient = slack as never as SlackClient;
+    const routeClient = new Client({ connectionString: testUrl });
+    await routeClient.connect();
+    await routeClient.query(`
+      insert into tenants (id, enabled)
+      values ('f59ac8a8-a7a7-42aa-b5ce-09b3508ae17a', false);
+      insert into slack_workspaces
+        (team_id, tenant_id, bot_user_id, bot_token_ciphertext, selected_channel_id)
+      values
+        ('TROUTE', 'f59ac8a8-a7a7-42aa-b5ce-09b3508ae17a', 'UBOT', 'not-used', null)
+    `);
+    assert.match((await store.inspectSlackTokenEncryption(null)).keyError!, /ENCRYPTION_KEY is required/);
 
     await assert.rejects(
       resolveChannel(store, slackClient),
@@ -1123,6 +1330,14 @@ try {
     assert.equal(repaired.channelId, "CA");
     assert.equal(repaired.initializedRoute, true);
     assert.equal(await store.getSelectedChannelId("TROUTE"), "CA");
+    assert.equal(
+      (
+        await routeClient.query<{ selected_channel_id: string }>(
+          "select selected_channel_id from slack_workspaces where team_id = 'TROUTE'",
+        )
+      ).rows[0]?.selected_channel_id,
+      "CA",
+    );
 
     // Additional memberships never change the explicit route.
     slack.channels = ["CA", "CB"];
@@ -1144,6 +1359,14 @@ try {
     assert.equal((await resolveChannel(store, slackClient)).channelId, "CA");
     await store.selectTeamChannel({ teamId: "TROUTE", channelId: "CB" });
     assert.equal(
+      (
+        await routeClient.query<{ selected_channel_id: string }>(
+          "select selected_channel_id from slack_workspaces where team_id = 'TROUTE'",
+        )
+      ).rows[0]?.selected_channel_id,
+      "CB",
+    );
+    assert.equal(
       await store.setSelectedChannelMentionSetting({
         teamId: "TROUTE",
         expectedChannelId: "CB",
@@ -1162,6 +1385,11 @@ try {
       true,
     );
     assert.equal((await resolveChannel(store, slackClient)).channelId, "CB");
+    // A later join must not replace the effective workspace selection with a stale legacy route.
+    await routeClient.query("update team_channel_routes set selected_channel_id = 'CA' where team_id = 'TROUTE'");
+    assert.equal((await store.initializeTeamChannelRoute({ teamId: "TROUTE", channelId: "CA" })).initializedRoute, false);
+    assert.equal(await store.getSelectedChannelId("TROUTE"), "CB");
+    assert.equal((await routeClient.query("select selected_channel_id from team_channel_routes where team_id = 'TROUTE'")).rows[0].selected_channel_id, "CB");
     assert.deepEqual(await store.getChannelSettings("TROUTE", "CB"), {
       mention: { mode: "custom", audience: "<!here>" },
       approvers: ["U2"],
@@ -1183,6 +1411,19 @@ try {
       mention: { mode: "approvers" },
       approvers: null,
     });
+
+    // During the compatibility window the populated workspace field wins reads,
+    // while the old route remains the fallback when the new value is null.
+    await routeClient.query(
+      "update slack_workspaces set selected_channel_id = 'CA' where team_id = 'TROUTE'",
+    );
+    assert.equal(await store.getSelectedChannelId("TROUTE"), "CA");
+    await routeClient.query(
+      "update slack_workspaces set selected_channel_id = null where team_id = 'TROUTE'",
+    );
+    assert.equal(await store.getSelectedChannelId("TROUTE"), "CB");
+    await store.selectTeamChannel({ teamId: "TROUTE", channelId: "CB" });
+    await routeClient.end();
 
     // Several memberships with no route are intentionally ambiguous.
     const ambiguous = makeSlackStub({ teamId: "TAMBIG", channels: ["CX", "CY"] });

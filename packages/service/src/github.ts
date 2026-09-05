@@ -21,6 +21,19 @@ type IssueComment = {
   html_url: string;
 };
 
+export type GitHubInstallation = {
+  installationId: string;
+  githubAccountId: string;
+};
+
+export type GitHubRepositoryIdentity = GitHubInstallation & {
+  repositoryId: string;
+  repositoryOwnerId: string;
+  owner: string;
+  repo: string;
+  fullName: string;
+};
+
 function b64url(input: string | Buffer): string {
   return Buffer.from(input)
     .toString("base64")
@@ -47,6 +60,31 @@ function appJwt(env: ServiceEnv): string {
   return `${data}.${b64url(signature)}`;
 }
 
+function decimalId(value: unknown, label: string): string {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`GitHub returned an invalid ${label}`);
+  }
+  return String(value);
+}
+
+function safeIdNumber(value: string, label: string): number {
+  if (!/^[1-9][0-9]*$/.test(value)) throw new Error(`${label} must be a positive decimal string`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || String(parsed) !== value) {
+    throw new Error(`${label} cannot be represented exactly as a JavaScript number`);
+  }
+  return parsed;
+}
+
+export class GitHubRequestError extends Error {
+  constructor(readonly status: number | null, readonly retryable = status === null || status === 429 || (status >= 500 && status <= 599)) {
+    super(status === null
+      ? "GitHub network request failed (retryable)"
+      : `GitHub API request failed: HTTP ${status} (${retryable ? "retryable; retry after GitHub recovers or its rate limit resets" : "check App permissions, installation and repository access"})`);
+    this.name = "GitHubRequestError";
+  }
+}
+
 async function githubFetch<T>(
   path: string,
   opts: {
@@ -64,10 +102,12 @@ async function githubFetch<T>(
       "X-GitHub-Api-Version": "2022-11-28",
     },
     body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
-  });
+  }).catch(() => { throw new GitHubRequestError(null); });
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`GitHub API ${opts.method ?? "GET"} ${path} failed: ${response.status} ${text}`);
+    const rateLimited = response.status === 403 && (response.headers.get("x-ratelimit-remaining") === "0" || response.headers.has("retry-after"));
+    // Never include response bodies or request headers: they may contain credentials.
+    await response.body?.cancel().catch(() => undefined);
+    throw new GitHubRequestError(response.status, rateLimited || response.status === 429 || response.status >= 500);
   }
   return (await response.json()) as T;
 }
@@ -78,6 +118,86 @@ export class GitHubClient {
 
   constructor(env: ServiceEnv) {
     this.#env = env;
+  }
+
+  async inspectInstallation(installationId: string): Promise<GitHubInstallation> {
+    const requestedId = safeIdNumber(installationId, "GitHub installation ID");
+    const installation = await githubFetch<{ id: number; account?: { id?: number } }>(
+      `/app/installations/${requestedId}`,
+      { token: appJwt(this.#env) },
+    );
+    const returnedId = decimalId(installation.id, "installation ID");
+    if (returnedId !== installationId) {
+      throw new Error("GitHub returned a different installation ID");
+    }
+    return {
+      installationId: returnedId,
+      githubAccountId: decimalId(installation.account?.id, "installation account ID"),
+    };
+  }
+
+  async resolveRepository(owner: string, repo: string): Promise<GitHubRepositoryIdentity> {
+    const encodedOwner = encodeURIComponent(owner);
+    const encodedRepo = encodeURIComponent(repo);
+    const jwt = appJwt(this.#env);
+    const installation = await githubFetch<{ id: number; account?: { id?: number } }>(
+      `/repos/${encodedOwner}/${encodedRepo}/installation`,
+      { token: jwt },
+    );
+    const installationId = decimalId(installation.id, "installation ID");
+    const githubAccountId = decimalId(installation.account?.id, "installation account ID");
+    const access = await githubFetch<{ token: string }>(
+      `/app/installations/${installationId}/access_tokens`,
+      { token: jwt, method: "POST", body: {} },
+    );
+    const repository = await githubFetch<{
+      id: number;
+      name: string;
+      full_name: string;
+      owner?: { id?: number; login?: string };
+    }>(`/repos/${encodedOwner}/${encodedRepo}`, { token: access.token });
+    const repositoryOwnerId = decimalId(repository.owner?.id, "repository owner ID");
+    if (repositoryOwnerId !== githubAccountId) {
+      throw new Error("GitHub repository owner does not match the installation account");
+    }
+    return {
+      installationId,
+      githubAccountId,
+      repositoryId: decimalId(repository.id, "repository ID"),
+      repositoryOwnerId,
+      owner: repository.owner?.login ?? owner,
+      repo: repository.name,
+      fullName: repository.full_name,
+    };
+  }
+
+  async inspectInstallationRepository(
+    installationId: string,
+    owner: string,
+    repo: string,
+  ): Promise<GitHubRepositoryIdentity> {
+    const installation = await this.inspectInstallation(installationId);
+    const repository = await this.resolveRepository(owner, repo);
+    if (
+      repository.installationId !== installation.installationId ||
+      repository.githubAccountId !== installation.githubAccountId
+    ) {
+      throw new Error("The selected repository does not belong to the requested installation");
+    }
+
+    // End-to-end check that the app can mint a token restricted to this exact
+    // repository. The token remains opaque and is never returned or logged.
+    await githubFetch<{ token: string }>(
+      `/app/installations/${installation.installationId}/access_tokens`,
+      {
+        token: appJwt(this.#env),
+        method: "POST",
+        body: {
+          repository_ids: [safeIdNumber(repository.repositoryId, "GitHub repository ID")],
+        },
+      },
+    );
+    return repository;
   }
 
   async tokenForRepo(owner: string, repo: string): Promise<string> {

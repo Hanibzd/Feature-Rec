@@ -193,6 +193,7 @@ GITHUB_APP_ID=<app id>
 GITHUB_PRIVATE_KEY=<private key>
 SLACK_BOT_TOKEN=<bot token>
 SLACK_SIGNING_SECRET=<signing secret>
+FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY=<32 random bytes encoded as base64>
 ```
 
 Railway supplies `PORT`; do not set it manually. The service runs migrations before listening, and
@@ -215,6 +216,29 @@ restore. The image and environment contract are not Railway-specific: migration 
 consists of restoring Postgres, supplying the same variables, deploying the same image, verifying
 `/health`, and switching DNS.
 
+The image also ships a compiled administration entrypoint at `dist/admin.js`. Set the encryption key
+before backfill/provisioning; the first successful token write pins an independent key verifier in
+`slack_token_encryption_key`. Startup rejects a missing/wrong key or missing verifier once tokens are
+stored. With a verified key, an individually corrupt token emits a tenant-scoped
+`SLACK_TOKEN_DECRYPTION_FAILED` error but does not block startup for other tenants. Readiness validation
+still fails until that token is repaired. Back up the database (including the verifier) and retain the
+key separately; do not replace either as a shortcut to key rotation.
+Run production commands through Railway's private network, for example:
+
+```bash
+railway ssh -- node dist/admin.js migration-status --environment production
+railway ssh -- node dist/admin.js backfill-multitenancy --environment production --dry-run
+railway ssh -- node dist/admin.js backfill-multitenancy --environment production --apply --confirm
+railway ssh -- node dist/admin.js validate-contract-readiness --environment production
+```
+
+Do not provision a second tenant while deploy A still accepts the shared runner token. Immediately
+before the OIDC cutover, pause and drain runner traffic, then rerun backfill with
+`--rebuild-cycle-keys --traffic-paused`. Every data-changing command requires `--confirm`; migration
+rollback requires stopping the service and preventing automatic restarts/deploys first. Run the newer
+admin artifact from a separate maintenance process before starting the older image; see the
+[rollback runbook](docs/feature-rec.md#backup-rollback-and-migration).
+
 ## Commands
 
 | Command | Description |
@@ -233,6 +257,7 @@ consists of restoring Postgres, supplying the same variables, deploying the same
 | `pnpm feature-rec:service` | Start the local Feature-Rec backend on `PORT` or `3000`. |
 | `pnpm feature-rec:selftest` | Run self-tests for core, service, and action packages. |
 | `pnpm --filter @feature-rec/service run build` | Compile the production backend into `packages/service/dist`. |
+| `node packages/service/dist/admin.js --help` | Show the compiled production administration commands. |
 | `docker build -t feature-rec-service:local .` | Build the backend-only production image. |
 
 ## Validate

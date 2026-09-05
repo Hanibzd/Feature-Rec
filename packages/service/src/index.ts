@@ -6,7 +6,18 @@ import { PostgresCycleStore } from "./storage/postgres";
 const env = readEnv();
 const store = new PostgresCycleStore(env.databaseUrl);
 await store.init();
+const tokenCheck = await store.inspectSlackTokenEncryption(env.slackTokenEncryptionKey);
+if (tokenCheck.keyError) {
+  await store.close();
+  throw new Error(tokenCheck.keyError);
+}
 const server = buildServer({ env, store });
+for (const workspace of tokenCheck.invalidWorkspaces) {
+  server.log.error(
+    { event: "SLACK_TOKEN_DECRYPTION_FAILED", ...workspace },
+    "Stored Slack token is unusable; repair this tenant's credentials. Deployment key verified; continuing startup for other tenants.",
+  );
+}
 
 const close = async () => {
   await server.close();

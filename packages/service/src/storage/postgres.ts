@@ -15,6 +15,9 @@ import {
 } from "../storage";
 import type { DB, ReviewCyclesTable } from "./schema";
 import { migrationProvider } from "./migrations";
+import { lockTeamChannelRoute, withMigrationLock } from "./locks";
+import { readSelectedChannel, writeSelectedChannel } from "./channel-routing";
+import { inspectSlackTokenEncryption } from "./slack-token-check";
 
 const ApproverIdsSchema = z.array(z.string());
 const MentionModeSchema = z.enum(["approvers", "custom", "off"]);
@@ -29,6 +32,11 @@ function now(): string {
 }
 
 function rowToCycle(row: Selectable<ReviewCyclesTable>): CycleRecord {
+  if (row.owner === null || row.repo === null) {
+    throw new Error(
+      `Review cycle ${row.id} has no repository coordinates required by the compatibility runtime`,
+    );
+  }
   return {
     id: row.id,
     cycleKey: row.cycle_key,
@@ -58,11 +66,15 @@ export class PostgresCycleStore implements CycleStore {
   }
 
   async init(): Promise<void> {
-    const migrator = new Migrator({ db: this.#db, provider: migrationProvider });
-    const { error } = await migrator.migrateToLatest();
-    if (error) {
-      throw error instanceof Error ? error : new Error(`Migration failed: ${String(error)}`);
-    }
+    await withMigrationLock(this.#db, async (db) => {
+      const migrator = new Migrator({ db, provider: migrationProvider });
+      const { error } = await migrator.migrateToLatest();
+      if (error) throw error instanceof Error ? error : new Error(`Migration failed: ${String(error)}`);
+    });
+  }
+
+  async inspectSlackTokenEncryption(key: Buffer | null) {
+    return inspectSlackTokenEncryption(this.#db, key);
   }
 
   async startCycle(input: RunStartRequest & { cycleKey: string }): Promise<StartCycleResult> {
@@ -244,12 +256,7 @@ export class PostgresCycleStore implements CycleStore {
   }
 
   async getSelectedChannelId(teamId: string): Promise<string | null> {
-    const row = await this.#db
-      .selectFrom("team_channel_routes")
-      .select("selected_channel_id")
-      .where("team_id", "=", teamId)
-      .executeTakeFirst();
-    return row?.selected_channel_id ?? null;
+    return readSelectedChannel(this.#db, teamId);
   }
 
   async initializeTeamChannelRoute(input: {
@@ -257,14 +264,10 @@ export class PostgresCycleStore implements CycleStore {
     channelId: string;
   }): Promise<{ initializedRoute: boolean }> {
     return this.#db.transaction().execute(async (trx) => {
-      const lockKey = `team-route:${input.teamId}`;
-      await sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`.execute(trx);
-      const result = await trx
-        .insertInto("team_channel_routes")
-        .values({ team_id: input.teamId, selected_channel_id: input.channelId })
-        .onConflict((oc) => oc.column("team_id").doNothing())
-        .executeTakeFirst();
-      return { initializedRoute: (result.numInsertedOrUpdatedRows ?? 0n) > 0n };
+      await lockTeamChannelRoute(trx, input.teamId);
+      const selected = await readSelectedChannel(trx, input.teamId);
+      await writeSelectedChannel(trx, input.teamId, selected ?? input.channelId);
+      return { initializedRoute: selected === null };
     });
   }
 
@@ -273,18 +276,8 @@ export class PostgresCycleStore implements CycleStore {
     channelId: string;
   }): Promise<void> {
     await this.#db.transaction().execute(async (trx) => {
-      const lockKey = `team-route:${input.teamId}`;
-      await sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`.execute(trx);
-      await trx
-        .insertInto("team_channel_routes")
-        .values({
-          team_id: input.teamId,
-          selected_channel_id: input.channelId,
-        })
-        .onConflict((oc) =>
-          oc.column("team_id").doUpdateSet({ selected_channel_id: input.channelId }),
-        )
-        .execute();
+      await lockTeamChannelRoute(trx, input.teamId);
+      await writeSelectedChannel(trx, input.teamId, input.channelId);
     });
   }
 
@@ -412,14 +405,8 @@ export class PostgresCycleStore implements CycleStore {
     set: ChannelSettingsColumns;
   }): Promise<boolean> {
     return this.#db.transaction().execute(async (trx) => {
-      const lockKey = `team-route:${input.teamId}`;
-      await sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`.execute(trx);
-      const route = await trx
-        .selectFrom("team_channel_routes")
-        .select("selected_channel_id")
-        .where("team_id", "=", input.teamId)
-        .executeTakeFirst();
-      if (route?.selected_channel_id !== input.expectedChannelId) return false;
+      await lockTeamChannelRoute(trx, input.teamId);
+      if (await readSelectedChannel(trx, input.teamId) !== input.expectedChannelId) return false;
       await this.#upsertChannelSettings(
         {
           teamId: input.teamId,
