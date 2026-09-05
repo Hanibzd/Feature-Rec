@@ -12,7 +12,7 @@ import {
   type RunStartRequest,
 } from "@feature-rec/core";
 import { ChannelResolutionError, resolveChannel } from "../src/channels";
-import { GitHubClient } from "../src/github";
+import { GitHubClient, GitHubRequestError } from "../src/github";
 import { readEnv, type ServiceEnv } from "../src/env";
 import { buildServer } from "../src/http";
 import { SlackClient, verifySlackSignature } from "../src/slack";
@@ -877,6 +877,27 @@ try {
         repo: "One",
         fullName: "Acme/One",
       });
+      for (const [status, headers, retryable] of [
+        [503, {}, true], [404, {}, false], [403, {}, false],
+        [403, { "x-ratelimit-remaining": "0" }, true], [429, {}, true],
+      ] as const) {
+        globalThis.fetch = async () => new Response("secret-response-body", { status, headers });
+        await assert.rejects(client.resolveRepository("Acme", "One"), (error: unknown) => {
+          assert.ok(error instanceof GitHubRequestError);
+          assert.equal(error.status, status);
+          assert.equal(error.retryable, retryable);
+          assert.ok(!error.message.includes("secret-response-body"));
+          return true;
+        });
+      }
+      globalThis.fetch = async () => { throw new Error("secret-network-diagnostic"); };
+      await assert.rejects(client.resolveRepository("Acme", "One"), (error: unknown) => {
+        assert.ok(error instanceof GitHubRequestError);
+        assert.equal(error.status, null);
+        assert.equal(error.retryable, true);
+        assert.ok(!error.message.includes("secret-network-diagnostic"));
+        return true;
+      });
     } finally {
       globalThis.fetch = previousFetch;
     }
@@ -1295,7 +1316,7 @@ try {
       values
         ('TROUTE', 'f59ac8a8-a7a7-42aa-b5ce-09b3508ae17a', 'UBOT', 'not-used', null)
     `);
-    assert.equal(await store.hasSlackWorkspaces(), true);
+    assert.match((await store.inspectSlackTokenEncryption(null)).keyError!, /ENCRYPTION_KEY is required/);
 
     await assert.rejects(
       resolveChannel(store, slackClient),
@@ -1364,6 +1385,11 @@ try {
       true,
     );
     assert.equal((await resolveChannel(store, slackClient)).channelId, "CB");
+    // A later join must not replace the effective workspace selection with a stale legacy route.
+    await routeClient.query("update team_channel_routes set selected_channel_id = 'CA' where team_id = 'TROUTE'");
+    assert.equal((await store.initializeTeamChannelRoute({ teamId: "TROUTE", channelId: "CA" })).initializedRoute, false);
+    assert.equal(await store.getSelectedChannelId("TROUTE"), "CB");
+    assert.equal((await routeClient.query("select selected_channel_id from team_channel_routes where team_id = 'TROUTE'")).rows[0].selected_channel_id, "CB");
     assert.deepEqual(await store.getChannelSettings("TROUTE", "CB"), {
       mention: { mode: "custom", audience: "<!here>" },
       approvers: ["U2"],

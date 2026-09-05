@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
+import { createServer } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -17,6 +19,8 @@ import {
 import { decryptSlackToken, encryptSlackToken } from "../src/slack-token-crypto";
 import { migrationProvider } from "../src/storage/migrations";
 import type { DB } from "../src/storage/schema";
+import { inspectSlackTokenEncryption } from "../src/storage/slack-token-check";
+import { GitHubRequestError } from "../src/github";
 
 const adminUrl =
   process.env.TEST_DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/postgres";
@@ -93,6 +97,7 @@ try {
       ...process.env,
       DATABASE_URL: testUrl,
       RAILWAY_ENVIRONMENT_NAME: "selftest",
+      PGAPPNAME: "feature-rec-admin-selftest",
       FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY: "invalid-key",
       GITHUB_OIDC_ISSUER: "invalid-issuer",
     },
@@ -101,10 +106,43 @@ try {
   const status = JSON.parse((await runAdmin(["migration-status"])).stdout);
   assert.equal(status.migrations.at(-1).name, "0008_multitenant_expand");
   assert.equal(status.migrations.at(-1).status, "executed");
-  await runAdmin(["migrate-to", "0007_mention_modes", "--confirm", "--expect-current", "0008_multitenant_expand"]);
+  for (const missing of ["--expect-current", "--service-stopped", "--traffic-paused"]) {
+    const flags = ["--confirm", "--service-stopped", "--traffic-paused"];
+    if (missing !== "--expect-current") flags.push("--expect-current", "0008_multitenant_expand");
+    await assert.rejects(runAdmin(["migrate-to", "0007_mention_modes", ...flags.filter((flag) => flag !== missing)]), /Schema downgrade requires/);
+    assert.equal(JSON.parse((await runAdmin(["migration-status"])).stdout).migrations.at(-1).status, "executed");
+  }
+  await assert.rejects(runAdmin(["migrate-to", "0007_mention_modes", "--confirm", "--expect-current"]), /argument missing|requires a value|argument is ambiguous/);
+  await assert.rejects(runAdmin(["migrate-to", "0007_mention_modes", "--confirm", "--expect-current=", "--service-stopped", "--traffic-paused"]), /non-empty value/);
+  const migrationBlocker = new Client({ connectionString: testUrl });
+  await migrationBlocker.connect();
+  try {
+    await migrationBlocker.query("select pg_advisory_lock(hashtextextended('feature-rec-migrations', 0))");
+    const competing = Promise.allSettled([0, 1].map(() => runAdmin(["migrate-to", "0007_mention_modes", "--confirm", "--expect-current", "0008_multitenant_expand", "--service-stopped", "--traffic-paused"])));
+    try {
+      await waitForBlockedQueries(2);
+    } finally {
+      await migrationBlocker.query("select pg_advisory_unlock(hashtextextended('feature-rec-migrations', 0))");
+    }
+    const results = await competing;
+    assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+    assert.match(String(results.find((result) => result.status === "rejected")?.reason), /Expected current migration/);
+  } finally {
+    await migrationBlocker.end();
+  }
   await runAdmin(["migrate-to", "0008_multitenant_expand", "--confirm", "--expect-current", "0007_mention_modes"]);
   assert.equal(JSON.parse((await runAdmin(["prepare-rollback-to-a", "--dry-run"])).stdout).ok, true);
   await assert.rejects(runAdmin(["validate-contract-readiness"]), /canonical base64/);
+
+  assert.deepEqual(await inspectSlackTokenEncryption(db, null), { keyError: null, invalidWorkspaces: [] });
+  const emptyBackfill = { db, providers, slackBotToken: "xoxb-admin", encryptionKey: key, tenantId };
+  const emptyDryRun = await backfillMultitenancy({ ...emptyBackfill, apply: false });
+  assert.deepEqual((await backfillMultitenancy({ ...emptyBackfill, apply: true })).issues, emptyDryRun.issues);
+  assert.ok(emptyDryRun.issues.some((issue) => issue.includes("at least one GitHub repository")));
+  assert.equal(await db.selectFrom("slack_token_encryption_key").selectAll().executeTakeFirst(), undefined);
+  for (const selectedChannelId of ["", " ", "CUNKNOWN"]) {
+    await assert.rejects(provisionTenant({ db, providers, slackBotToken: "xoxb-new", encryptionKey: key, installationId: "502", repository: { owner: "Beta", repo: "Three" }, selectedChannelId }), /channel ID must not be empty|not a member/);
+  }
 
   await sql`
     insert into team_channel_routes (team_id, selected_channel_id)
@@ -179,6 +217,11 @@ try {
     apply: false,
   });
   assert.deepEqual(unresolved.unresolvedRepositories, ["Acme/Two"]);
+  for (const failure of [new GitHubRequestError(503), new GitHubRequestError(404), new GitHubRequestError(null), new Error("secret-do-not-log")]) {
+    const report = await backfillMultitenancy({ db, providers: { ...providers, resolveRepository: async () => { throw failure; } }, slackBotToken: "xoxb-admin", encryptionKey: key, tenantId, apply: false });
+    assert.ok(report.issues.some((issue) => issue.includes(failure instanceof GitHubRequestError ? failure.message : "unexpected discovery failure")));
+    assert.ok(!JSON.stringify(report).includes("secret-do-not-log"));
+  }
 
   const dryRun = await backfillMultitenancy({
     db,
@@ -207,6 +250,19 @@ try {
   });
   assert.equal(applied.applied, true);
   assert.equal(applied.validation?.ok, true);
+  assert.deepEqual(await inspectSlackTokenEncryption(db, key), { keyError: null, invalidWorkspaces: [] });
+  assert.match((await inspectSlackTokenEncryption(db, Buffer.alloc(32, 10))).keyError!, /does not match/);
+  assert.match((await inspectSlackTokenEncryption(db, null)).keyError!, /ENCRYPTION_KEY is required/);
+  const wrongKeyDryRun = await backfillMultitenancy({ ...emptyBackfill, encryptionKey: Buffer.alloc(32, 10), apply: false });
+  assert.ok(wrongKeyDryRun.issues.some((issue) => issue.includes("does not match")));
+  assert.deepEqual((await backfillMultitenancy({ ...emptyBackfill, encryptionKey: Buffer.alloc(32, 10), apply: true })).issues, wrongKeyDryRun.issues);
+  const savedVerifier = await db.selectFrom("slack_token_encryption_key").selectAll().executeTakeFirstOrThrow();
+  await db.deleteFrom("slack_token_encryption_key").execute();
+  assert.match((await inspectSlackTokenEncryption(db, key)).keyError!, /verifier is missing/);
+  await assert.rejects(provisionTenant({ db, providers, slackBotToken: "xoxb-new", encryptionKey: key, installationId: "502", repository: { owner: "Beta", repo: "Three" } }), /verifier is missing/);
+  await db.insertInto("slack_token_encryption_key").values(savedVerifier).execute();
+  await assert.rejects(provisionTenant({ db, providers, slackBotToken: "xoxb-new", encryptionKey: Buffer.alloc(32, 10), installationId: "502", repository: { owner: "Beta", repo: "Three" } }), /does not match/);
+  assert.equal(await db.selectFrom("slack_workspaces").selectAll().where("team_id", "=", "TNEW").executeTakeFirst(), undefined);
   const workspace = await db
     .selectFrom("slack_workspaces")
     .selectAll()
@@ -298,6 +354,50 @@ try {
   const invalidCiphertext = await validateMultitenancy({ db, encryptionKey: key });
   assert.equal(invalidCiphertext.ok, false);
   assert.ok(invalidCiphertext.issues.some((issue) => issue.includes("team-bound AAD")));
+  // An independently verified key lets even the sole corrupted token remain tenant-local.
+  assert.deepEqual(await inspectSlackTokenEncryption(db, key), { keyError: null, invalidWorkspaces: [{ tenantId, teamId: "TADMIN" }] });
+  const portProbe = createServer();
+  portProbe.listen(0, "127.0.0.1");
+  await once(portProbe, "listening");
+  const port = (portProbe.address() as { port: number }).port;
+  await new Promise<void>((resolve, reject) => portProbe.close((error) => error ? reject(error) : resolve()));
+  const startService = (encryptionKey: Buffer) => {
+    const child = spawn(process.execPath, ["--import", "tsx", "src/index.ts"], {
+      cwd: fileURLToPath(new URL("../", import.meta.url)),
+      env: { ...process.env, DATABASE_URL: testUrl, PORT: String(port), FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY: encryptionKey.toString("base64"), GITHUB_OIDC_ISSUER: "https://token.actions.githubusercontent.com" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let logs = "";
+    child.stdout.on("data", (data) => { logs += String(data); });
+    child.stderr.on("data", (data) => { logs += String(data); });
+    return { child, logs: () => logs };
+  };
+  const healthy = startService(key);
+  const healthyExit = once(healthy.child, "exit");
+  try {
+    const deadline = Date.now() + 10_000;
+    while (!healthy.logs().includes("Server listening at") && healthy.child.exitCode === null && Date.now() < deadline) await delay(20);
+    assert.match(healthy.logs(), /Server listening at/);
+    assert.match(healthy.logs(), /SLACK_TOKEN_DECRYPTION_FAILED/);
+    assert.match(healthy.logs(), /TADMIN/);
+    assert.ok(!healthy.logs().includes(wrongAad) && !healthy.logs().includes("xoxb-admin"));
+    const address = /Server listening at (http:\/\/127\.0\.0\.1:\d+)/.exec(healthy.logs())?.[1];
+    assert.ok(address);
+    assert.equal((await fetch(`${address}/health`)).status, 200);
+  } finally {
+    healthy.child.kill("SIGTERM");
+    await healthyExit;
+  }
+  const wrongKeyStartup = startService(Buffer.alloc(32, 10));
+  const wrongExit = once(wrongKeyStartup.child, "exit");
+  const timeout = setTimeout(() => wrongKeyStartup.child.kill("SIGKILL"), 10_000);
+  try {
+    assert.equal((await wrongExit)[0], 1);
+    assert.match(wrongKeyStartup.logs(), /does not match the database verifier/);
+    assert.ok(!wrongKeyStartup.logs().includes("Server listening at"));
+  } finally {
+    clearTimeout(timeout);
+  }
   await backfillMultitenancy({
     db,
     providers,
@@ -360,6 +460,9 @@ try {
   });
   assert.equal(provisioned.tenantId, secondTenantId);
   assert.equal(provisioned.selectedChannelId, "CNEW");
+  await db.updateTable("slack_workspaces").set({ bot_token_ciphertext: "corrupt" }).where("team_id", "=", "TADMIN").execute();
+  assert.deepEqual(await inspectSlackTokenEncryption(db, key), { keyError: null, invalidWorkspaces: [{ tenantId, teamId: "TADMIN" }] });
+  await db.updateTable("slack_workspaces").set({ bot_token_ciphertext: workspace.bot_token_ciphertext }).where("team_id", "=", "TADMIN").execute();
   assert.equal(
     await db.selectFrom("team_channel_routes").select("selected_channel_id").where("team_id", "=", "TNEW").executeTakeFirstOrThrow().then((row) => row.selected_channel_id),
     "CNEW",

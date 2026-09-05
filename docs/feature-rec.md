@@ -198,13 +198,38 @@ legacy repository through the GitHub App, detects future cycle-key collisions, w
 tenant transactionally, and enables it only after validation. Deploy A still uses shared runner
 authentication, so do not provision a second tenant yet.
 
+The first successful backfill/provisioning transaction stores an independent HMAC-SHA256 key verifier
+in the singleton `slack_token_encryption_key` table; subsequent writes and startup must match it.
+Startup decrypt-checks stored tokens after checking that verifier. A wrong/missing key or missing
+verifier prevents startup; one corrupt token produces an error with the tenant/workspace IDs and
+event `SLACK_TOKEN_DECRYPTION_FAILED`, without blocking other tenants. Investigate that alert and
+repair/re-provision the affected credentials; readiness validation continues to fail until repaired.
+Neither tokens nor ciphertexts are logged. Back up the verifier with the database and the key
+separately. Never delete the verifier to bypass a key mismatch; restore the matching backup/key.
+
+The verifier table is part of the still-unreleased `0008` migration. Disposable development databases
+that already ran an earlier version of this PR must be recreated, or deliberately rolled back/reapplied
+with backups; startup does not silently rewrite an already-executed migration.
+
 For the final pre-cutover reconciliation, pause new workflows and drain active runs, then use
 `backfill-multitenancy --apply --confirm --rebuild-cycle-keys --traffic-paused`. To roll the database
-back to the pre-A schema, first run
-`migrate-to 0007_mention_modes --expect-current 0008_multitenant_expand --confirm` from the deploy-A
-artifact, verify the status, and only then start the older image. If the normal image cannot become
-healthy, run the retained artifact against a private `railway connect postgres --tunnel-only`
-connection; do not make PostgreSQL public.
+back to the pre-expansion schema:
+
+1. Pause runner and Slack writes, drain active requests, and verify a fresh database backup and the
+   retained older release. Disable automatic deploys and stop all current service instances using
+   the platform's deployment controls; killing a process is not enough with an always-restart policy.
+2. From a **separate maintenance process**, run the retained newer admin artifact against the private
+   database (for example via a private `railway connect postgres --tunnel-only` connection). Do not
+   use `railway ssh` inside the still-running service for a schema downgrade. Check migration status.
+3. Run `node dist/admin.js migrate-to 0007_mention_modes --environment production --expect-current
+   0008_multitenant_expand --service-stopped --traffic-paused --confirm`. These flags acknowledge
+   actual operator actions; they do not stop Railway for you. The expected-current check and migration
+   are serialized with startup migrations, but a later service restart would reapply `0008`.
+4. Verify migration status, start only the pinned older image, check `/health` and an existing review
+   flow, then resume traffic. Restore autodeploys only once their target is safe for the chosen schema.
+
+Do not expose PostgreSQL publicly or hand-edit Kysely's migration records. Downgrading `0008` removes
+tenant integrations and the key verifier; retain the backup for recovery.
 
 Migration `0006_drop_legacy_bot_channels` permanently removes the obsolete membership snapshot after
 explicit routing has completed its observation window. Before deploying it, verify every expected

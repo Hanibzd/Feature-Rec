@@ -14,6 +14,8 @@ import { GitHubClient } from "./github";
 import { SlackClient } from "./slack";
 import { migrationProvider } from "./storage/migrations";
 import type { DB } from "./storage/schema";
+import { parseArgs, readSecret, type ParsedArgs } from "./admin-input";
+import { withMigrationLock } from "./storage/locks";
 
 const HELP = `Feature-Rec production administration
 
@@ -21,6 +23,7 @@ Usage:
   node dist/admin.js migration-status --environment <name>
   node dist/admin.js migrate-to <migration> --environment <name> --confirm
     [--expect-current <migration>]
+    (downgrades also require --expect-current, --service-stopped and --traffic-paused)
   node dist/admin.js validate-contract-readiness --environment <name> [--require-future-cycle-keys]
   node dist/admin.js backfill-multitenancy --environment <name> (--dry-run | --apply --confirm)
     [--tenant-id <uuid>] [--rebuild-cycle-keys --traffic-paused]
@@ -33,40 +36,9 @@ Usage:
 
 Run production commands inside Railway with:
   railway ssh -- node dist/admin.js <subcommand> ...
+For schema downgrades, stop the service first and run the retained admin artifact
+from a separate maintenance process. Do not downgrade from a live service shell.
 `;
-
-type ParsedArgs = {
-  command: string | undefined;
-  positionals: string[];
-  flags: Map<string, string | true>;
-};
-
-function parseArgs(argv: string[]): ParsedArgs {
-  const [command, ...rest] = argv;
-  const positionals: string[] = [];
-  const flags = new Map<string, string | true>();
-  for (let index = 0; index < rest.length; index += 1) {
-    const arg = rest[index];
-    if (!arg.startsWith("--")) {
-      positionals.push(arg);
-      continue;
-    }
-    const equals = arg.indexOf("=");
-    if (equals !== -1) {
-      flags.set(arg.slice(2, equals), arg.slice(equals + 1));
-      continue;
-    }
-    const name = arg.slice(2);
-    const next = rest[index + 1];
-    if (next !== undefined && !next.startsWith("--")) {
-      flags.set(name, next);
-      index += 1;
-    } else {
-      flags.set(name, true);
-    }
-  }
-  return { command, positionals, flags };
-}
 
 function flag(args: ParsedArgs, name: string): string | undefined {
   const value = args.flags.get(name);
@@ -122,51 +94,6 @@ function parseRepository(value: string): { owner: string; repo: string } {
   return { owner: match[1], repo: match[2] };
 }
 
-async function readSecret(): Promise<string> {
-  if (!process.stdin.isTTY) {
-    const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
-    }
-    const secret = Buffer.concat(chunks).toString("utf8").replace(/[\r\n]+$/, "");
-    if (!secret || /[\r\n]/.test(secret)) throw new Error("stdin must contain exactly one Slack bot token");
-    return secret;
-  }
-
-  const tty = process.stdin;
-  if (!tty.setRawMode) throw new Error("Cannot disable terminal echo; pipe the Slack bot token on stdin");
-  process.stderr.write("Slack bot token: ");
-  tty.setRawMode(true);
-  tty.resume();
-  tty.setEncoding("utf8");
-  return new Promise<string>((resolve, reject) => {
-    let value = "";
-    const finish = (error?: Error) => {
-      tty.setRawMode?.(false);
-      tty.pause();
-      tty.removeListener("data", onData);
-      process.stderr.write("\n");
-      if (error) reject(error);
-      else resolve(value);
-    };
-    const onData = (chunk: string) => {
-      for (const character of chunk) {
-        if (character === "\u0003") return finish(new Error("Cancelled"));
-        if (character === "\r" || character === "\n") {
-          if (!value) return finish(new Error("Slack bot token must not be empty"));
-          return finish();
-        }
-        if (character === "\u007f" || character === "\b") {
-          value = value.slice(0, -1);
-        } else {
-          value += character;
-        }
-      }
-    };
-    tty.on("data", onData);
-  });
-}
-
 function providers(env: ServiceEnv): AdminProviders {
   const github = new GitHubClient(env);
   return {
@@ -220,23 +147,28 @@ async function main(): Promise<void> {
       if (!target || args.positionals.length !== 1) throw new Error("migrate-to requires exactly one migration name");
       const available = await migrationProvider.getMigrations();
       if (!(target in available)) throw new Error(`Unknown migration target: ${target}`);
-      const migrator = new Migrator({ db, provider: migrationProvider });
-      const before = (await migrator.getMigrations()).filter((row) => row.executedAt).at(-1)?.name;
-      const expectedCurrent = flag(args, "expect-current");
-      if (expectedCurrent && before !== expectedCurrent) {
-        throw new Error(
-          `Expected current migration ${expectedCurrent}, found ${before ?? "none"}`,
-        );
-      }
-      const result = await migrator.migrateTo(target);
-      if (result.error || result.results?.some((row) => row.status !== "Success")) {
-        throw result.error instanceof Error
-          ? result.error
-          : new Error(`Migration failed: ${String(result.error ?? "non-success result")}`);
-      }
-      const current = (await migrator.getMigrations()).filter((row) => row.executedAt).at(-1)?.name;
-      if (current !== target) throw new Error(`Expected migration ${target}, found ${current ?? "none"}`);
-      print(environment, { target, results: result.results ?? [] });
+      await withMigrationLock(db, async (connection) => {
+        const migrator = new Migrator({ db: connection, provider: migrationProvider });
+        const before = (await migrator.getMigrations()).filter((row) => row.executedAt).at(-1)?.name;
+        const expectedCurrent = flag(args, "expect-current");
+        if (before && target < before && (!expectedCurrent || !boolFlag(args, "service-stopped") || !boolFlag(args, "traffic-paused"))) {
+          throw new Error("Schema downgrade requires --expect-current, --service-stopped and --traffic-paused; stop the service and prevent automatic restarts/deploys first");
+        }
+        if (expectedCurrent && before !== expectedCurrent) {
+          throw new Error(
+            `Expected current migration ${expectedCurrent}, found ${before ?? "none"}`,
+          );
+        }
+        const result = await migrator.migrateTo(target);
+        if (result.error || result.results?.some((row) => row.status !== "Success")) {
+          throw result.error instanceof Error
+            ? result.error
+            : new Error(`Migration failed: ${String(result.error ?? "non-success result")}`);
+        }
+        const current = (await migrator.getMigrations()).filter((row) => row.executedAt).at(-1)?.name;
+        if (current !== target) throw new Error(`Expected migration ${target}, found ${current ?? "none"}`);
+        print(environment, { target, results: result.results ?? [] });
+      });
       return;
     }
 

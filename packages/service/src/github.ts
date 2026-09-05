@@ -76,6 +76,15 @@ function safeIdNumber(value: string, label: string): number {
   return parsed;
 }
 
+export class GitHubRequestError extends Error {
+  constructor(readonly status: number | null, readonly retryable = status === null || status === 429 || (status >= 500 && status <= 599)) {
+    super(status === null
+      ? "GitHub network request failed (retryable)"
+      : `GitHub API request failed: HTTP ${status} (${retryable ? "retryable; retry after GitHub recovers or its rate limit resets" : "check App permissions, installation and repository access"})`);
+    this.name = "GitHubRequestError";
+  }
+}
+
 async function githubFetch<T>(
   path: string,
   opts: {
@@ -93,10 +102,12 @@ async function githubFetch<T>(
       "X-GitHub-Api-Version": "2022-11-28",
     },
     body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
-  });
+  }).catch(() => { throw new GitHubRequestError(null); });
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`GitHub API ${opts.method ?? "GET"} ${path} failed: ${response.status} ${text}`);
+    const rateLimited = response.status === 403 && (response.headers.get("x-ratelimit-remaining") === "0" || response.headers.has("retry-after"));
+    // Never include response bodies or request headers: they may contain credentials.
+    await response.body?.cancel().catch(() => undefined);
+    throw new GitHubRequestError(response.status, rateLimited || response.status === 429 || response.status >= 500);
   }
   return (await response.json()) as T;
 }

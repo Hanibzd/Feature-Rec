@@ -3,6 +3,13 @@ import { sql } from "kysely";
 
 export async function up(db: Kysely<unknown>): Promise<void> {
   await db.schema
+    .createTable("slack_token_encryption_key")
+    .addColumn("id", "integer", (col) => col.primaryKey())
+    .addColumn("verifier", "text", (col) => col.notNull())
+    .addCheckConstraint("slack_token_encryption_key_singleton", sql`id = 1`)
+    .execute();
+
+  await db.schema
     .createTable("tenants")
     .addColumn("id", "uuid", (col) => col.primaryKey())
     .addColumn("enabled", "boolean", (col) => col.notNull().defaultTo(false))
@@ -80,5 +87,6 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   await db.schema.alterTable("review_cycles").dropColumn("repository_id").dropColumn("tenant_id").execute();
   await db.schema.dropTable("github_installations").execute();
   await db.schema.dropTable("slack_workspaces").execute();
+  await db.schema.dropTable("slack_token_encryption_key").execute();
   await db.schema.dropTable("tenants").execute();
 }

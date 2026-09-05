@@ -180,7 +180,13 @@ action, service, backfill, duplicate detection, and GitHub check-run
 
 Add `FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY`, containing exactly 32 random bytes
 encoded as base64. Fail startup when the key is missing or malformed in any
-environment that contains Slack workspace rows.
+environment that contains Slack workspace rows. The first token-write transaction pins an independent
+HMAC-SHA256 verifier in a singleton `slack_token_encryption_key` table (included in `0008`). Later
+token writes and startup verify the supplied key against it. A wrong key or missing verifier blocks
+startup, but with a verified key an individual token's decryption failure logs a prominent
+tenant-scoped error and startup continues. Contract-readiness validation still reports those failures.
+Back up the verifier with the database and retain the key separately; no automatic verifier reset
+or key rotation is allowed.
 
 Implement AES-256-GCM encryption in a small service module. Store a versioned
 text envelope such as:
@@ -191,8 +197,8 @@ v1:<base64 IV>:<base64 auth tag>:<base64 ciphertext>
 
 Use `team_id` as additional authenticated data so swapping ciphertext between
 workspace rows fails decryption. Never log plaintext tokens, ciphertexts, OAuth
-JWTs, authorization headers, or encryption keys. Decrypt only while constructing
-a team-bound Slack client for an operation.
+JWTs, authorization headers, or encryption keys. Decrypt during the startup/readiness check without
+retaining plaintext, or while constructing a team-bound Slack client for an operation.
 
 Do not persist decrypted clients indefinitely. For beta, one DB lookup and
 decrypt per logical Slack operation is preferable to token-rotation cache
@@ -797,14 +803,20 @@ it will fail startup before the health endpoint listens.
 Each release migration has a tested `down()` and every release artifact is
 retained. To roll back:
 
-1. Pause runner and Slack mutation traffic and verify a fresh backup.
-2. Use the currently applied/newer artifact's admin command to print migration
-   status and assert the expected current migration.
-3. Run `node dist/admin.js migrate-to <target> --confirm` inside Railway. Inspect
+1. Pause runner and Slack mutation traffic, drain requests, and verify a fresh backup.
+   Disable automatic deploys and stop all current service instances through deployment controls so
+   the always-restart policy cannot recreate them. A process kill alone is insufficient.
+2. Use the currently applied/newer artifact's admin command from a separate maintenance process
+   over the private database connection to print migration status. Do not downgrade via a live
+   service's SSH shell: a restart would automatically reapply its latest migration.
+3. Run `node dist/admin.js migrate-to <target> --environment production --expect-current <current>
+   --service-stopped --traffic-paused --confirm` there. These acknowledgements do not stop the
+   platform automatically. The current-migration check and migration share a lock with startup. Inspect
    `MigrationResultSet.error` and every result; exit nonzero on any failure.
 4. Verify the migration table and schema at the target. Do not edit Kysely's
    migration table manually.
-5. Only then redeploy the older application artifact and run its smoke test.
+5. Only then redeploy the pinned older application artifact and run its smoke test. Resume traffic,
+   and restore autodeploys only after checking their target is safe for the chosen schema.
 
 Targets:
 

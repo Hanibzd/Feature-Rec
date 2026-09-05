@@ -2,9 +2,12 @@ import crypto from "node:crypto";
 import type { Kysely, Transaction } from "kysely";
 import { sql } from "kysely";
 import { buildCycleKey, buildTenantCycleKey } from "@feature-rec/core";
-import type { GitHubRepositoryIdentity } from "./github";
-import { decryptSlackToken, encryptSlackToken } from "./slack-token-crypto";
+import { GitHubRequestError, type GitHubRepositoryIdentity } from "./github";
+import { encryptSlackToken } from "./slack-token-crypto";
 import type { DB } from "./storage/schema";
+import { lockTeamChannelRoute, lockTenantProvisioning } from "./storage/locks";
+import { ensureSlackTokenKey, inspectSlackTokenEncryption } from "./storage/slack-token-check";
+import { writeSelectedChannel } from "./storage/channel-routing";
 
 type Database = Kysely<DB> | Transaction<DB>;
 
@@ -134,18 +137,19 @@ export async function validateMultitenancy(input: {
     issues.push(`${nullCycleIds.rows[0]?.count ?? "unknown"} review cycle(s) lack tenant/repository identity`);
   }
 
-  const duplicateFutureKeys = await sql<{ future_key: string; count: string }>`
+  const duplicateFutureKeys = await sql<{ tenant_id: string; repository_id: string; pr_number: number; head_sha: string; count: string }>`
     select
-      tenant_id::text || '/' || repository_id::text || '#' || pr_number::text || ':' || head_sha as future_key,
+      tenant_id::text, repository_id::text, pr_number, head_sha,
       count(*)::text as count
     from review_cycles
     where tenant_id is not null and repository_id is not null
     group by tenant_id, repository_id, pr_number, head_sha
     having count(*) > 1
-    order by future_key
+    order by tenant_id, repository_id, pr_number, head_sha
   `.execute(input.db);
   for (const collision of duplicateFutureKeys.rows) {
-    issues.push(`future cycle key collision (${collision.count} rows): ${collision.future_key}`);
+    const key = buildTenantCycleKey({ tenantId: collision.tenant_id, repositoryId: collision.repository_id, prNumber: collision.pr_number, headSha: collision.head_sha });
+    issues.push(`future cycle key collision (${collision.count} rows): ${key}`);
   }
 
   if (input.requireFutureCycleKeys) {
@@ -211,25 +215,10 @@ export async function validateMultitenancy(input: {
     issues.push(`selected-channel compatibility values diverge for ${row.team_id}`);
   }
 
-  const workspaces = await input.db
-    .selectFrom("slack_workspaces")
-    .select(["team_id", "bot_token_ciphertext"])
-    .orderBy("team_id")
-    .execute();
-  if (workspaces.length > 0 && !input.encryptionKey) {
-    issues.push("Slack workspace rows exist but FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY is unavailable");
-  } else if (input.encryptionKey) {
-    for (const workspace of workspaces) {
-      try {
-        decryptSlackToken({
-          envelope: workspace.bot_token_ciphertext,
-          teamId: workspace.team_id,
-          key: input.encryptionKey,
-        });
-      } catch {
-        issues.push(`Slack token ciphertext for ${workspace.team_id} cannot be decrypted with team-bound AAD`);
-      }
-    }
+  const tokenCheck = await inspectSlackTokenEncryption(input.db, input.encryptionKey);
+  if (tokenCheck.keyError) issues.push(tokenCheck.keyError);
+  for (const workspace of tokenCheck.invalidWorkspaces) {
+    issues.push(`Slack token ciphertext for ${workspace.teamId} cannot be decrypted with team-bound AAD`);
   }
 
   return {
@@ -239,12 +228,12 @@ export async function validateMultitenancy(input: {
   };
 }
 
-async function assertBackfillPairings(input: {
+async function loadPairings(input: {
   db: Database;
   tenantId: string;
   slack: SlackInstallationInspection;
   repository: GitHubRepositoryIdentity;
-}): Promise<void> {
+}) {
   const [teamRow, tenantWorkspace, installationRow, tenantInstallation, accountRow] =
     await Promise.all([
       input.db.selectFrom("slack_workspaces").selectAll().where("team_id", "=", input.slack.teamId).executeTakeFirst(),
@@ -253,6 +242,11 @@ async function assertBackfillPairings(input: {
       input.db.selectFrom("github_installations").selectAll().where("tenant_id", "=", input.tenantId).executeTakeFirst(),
       input.db.selectFrom("github_installations").selectAll().where("github_account_id", "=", input.repository.githubAccountId).executeTakeFirst(),
     ]);
+  return { teamRow, tenantWorkspace, installationRow, tenantInstallation, accountRow };
+}
+
+async function assertBackfillPairings(input: Parameters<typeof loadPairings>[0]): Promise<void> {
+  const { teamRow, tenantWorkspace, installationRow, tenantInstallation, accountRow } = await loadPairings(input);
   if (teamRow && teamRow.tenant_id !== input.tenantId) throw new Error("Slack workspace is already paired to another tenant");
   if (tenantWorkspace && tenantWorkspace.team_id !== input.slack.teamId) throw new Error("Tenant is already paired to another Slack workspace");
   if (installationRow && installationRow.tenant_id !== input.tenantId) throw new Error("GitHub installation is already paired to another tenant");
@@ -310,6 +304,8 @@ export async function backfillMultitenancy(input: {
     order by team_id
   `.execute(input.db);
   const issues: string[] = [];
+  const tokenCheck = await inspectSlackTokenEncryption(input.db, input.encryptionKey);
+  if (tokenCheck.keyError) issues.push(tokenCheck.keyError);
   for (const row of teamRows.rows) {
     if (row.team_id !== slack.teamId) {
       issues.push(`legacy Slack row ${row.team_id} does not belong to current bot workspace ${slack.teamId}`);
@@ -331,9 +327,12 @@ export async function backfillMultitenancy(input: {
     const [owner, repo] = pair.split("\u0000");
     try {
       repositories.set(pair, await input.providers.resolveRepository(owner, repo));
-    } catch {
+    } catch (error) {
       unresolvedRepositories.push(`${owner}/${repo}`);
-      issues.push(`legacy repository ${owner}/${repo} could not be resolved through the GitHub App`);
+      const reason = error instanceof GitHubRequestError
+        ? error.message
+        : "unexpected discovery failure; check GitHub App configuration and repository access";
+      issues.push(`legacy repository ${owner}/${repo} could not be resolved through the GitHub App: ${reason}`);
     }
   }
   const installationIds = unique([...repositories.values()].map((row) => row.installationId));
@@ -369,6 +368,7 @@ export async function backfillMultitenancy(input: {
   }
 
   const representative = repositories.values().next().value as GitHubRepositoryIdentity | undefined;
+  if (!representative) issues.push("Backfill requires at least one GitHub repository; use provision-tenant for an empty review history");
   if (representative) {
     try {
       await assertBackfillPairings({ db: input.db, tenantId, slack, repository: representative });
@@ -396,10 +396,7 @@ export async function backfillMultitenancy(input: {
     validation: null,
     issues,
   };
-  if (issues.length > 0 || !input.apply) return baseReport;
-  if (!representative) {
-    return { ...baseReport, issues: ["Backfill requires at least one GitHub repository"] };
-  }
+  if (issues.length > 0 || !input.apply || !representative) return baseReport;
 
   const ciphertext = encryptSlackToken({
     token: input.slackBotToken,
@@ -407,13 +404,13 @@ export async function backfillMultitenancy(input: {
     key: input.encryptionKey,
   });
   await input.db.transaction().execute(async (trx) => {
-    // Serialize integration ownership checks, including rows that do not exist yet.
-    await sql`select pg_advisory_xact_lock(hashtextextended('tenant-integration-provisioning', 0))`.execute(trx);
+    await lockTenantProvisioning(trx);
+    await ensureSlackTokenKey(trx, input.encryptionKey);
     if (await countTable(trx, "tenants") > 1) {
       throw new Error("Singleton backfill cannot run after more than one tenant has been provisioned");
     }
     selectTenantId(tenantId, await integrationTenantCandidates(trx));
-    await sql`select pg_advisory_xact_lock(hashtextextended(${`team-route:${slack.teamId}`}, 0))`.execute(trx);
+    await lockTeamChannelRoute(trx, slack.teamId);
     await assertBackfillPairings({ db: trx, tenantId, slack, repository: representative });
     await trx
       .insertInto("tenants")
@@ -451,6 +448,7 @@ export async function backfillMultitenancy(input: {
         }),
       )
       .execute();
+    if (selectedChannelId !== null) await writeSelectedChannel(trx, slack.teamId, selectedChannelId);
     await trx
       .insertInto("github_installations")
       .values({
@@ -536,6 +534,9 @@ export async function provisionTenant(input: {
   replacePairing?: boolean;
 }): Promise<ProvisionReport> {
   if (!input.slackBotToken) throw new Error("Slack bot token must not be empty");
+  if (input.selectedChannelId !== undefined && !input.selectedChannelId.trim()) {
+    throw new Error("Selected channel ID must not be empty");
+  }
   positiveDecimal(input.installationId, "GitHub installation ID");
   const [slack, repository] = await Promise.all([
     input.providers.inspectSlackToken(input.slackBotToken),
@@ -545,7 +546,7 @@ export async function provisionTenant(input: {
       input.repository.repo,
     ),
   ]);
-  if (input.selectedChannelId && !slack.channelIds.includes(input.selectedChannelId)) {
+  if (input.selectedChannelId !== undefined && !slack.channelIds.includes(input.selectedChannelId)) {
     throw new Error("The Slack bot is not a member of the selected channel");
   }
 
@@ -555,8 +556,8 @@ export async function provisionTenant(input: {
     key: input.encryptionKey,
   });
   return input.db.transaction().execute(async (trx) => {
-    // Serialize integration ownership checks, including rows that do not exist yet.
-    await sql`select pg_advisory_xact_lock(hashtextextended('tenant-integration-provisioning', 0))`.execute(trx);
+    await lockTenantProvisioning(trx);
+    await ensureSlackTokenKey(trx, input.encryptionKey);
     const existingMatches = await sql<{ tenant_id: string }>`
       select tenant_id::text as tenant_id from slack_workspaces where team_id = ${slack.teamId}
       union
@@ -575,15 +576,9 @@ export async function provisionTenant(input: {
         : crypto.randomUUID();
 
     // Match channel-selection writers: lock before reading the value to preserve.
-    await sql`select pg_advisory_xact_lock(hashtextextended(${`team-route:${slack.teamId}`}, 0))`.execute(trx);
-    const [teamRow, tenantWorkspace, installationRow, tenantInstallation, accountRow] =
-      await Promise.all([
-        trx.selectFrom("slack_workspaces").selectAll().where("team_id", "=", slack.teamId).executeTakeFirst(),
-        trx.selectFrom("slack_workspaces").selectAll().where("tenant_id", "=", tenantId).executeTakeFirst(),
-        trx.selectFrom("github_installations").selectAll().where("installation_id", "=", repository.installationId).executeTakeFirst(),
-        trx.selectFrom("github_installations").selectAll().where("tenant_id", "=", tenantId).executeTakeFirst(),
-        trx.selectFrom("github_installations").selectAll().where("github_account_id", "=", repository.githubAccountId).executeTakeFirst(),
-      ]);
+    await lockTeamChannelRoute(trx, slack.teamId);
+    const { teamRow, tenantWorkspace, installationRow, tenantInstallation, accountRow } =
+      await loadPairings({ db: trx, tenantId, slack, repository });
     const conflicts = [
       teamRow && teamRow.tenant_id !== tenantId ? `Slack workspace ${slack.teamId}` : null,
       tenantWorkspace && tenantWorkspace.team_id !== slack.teamId ? `tenant Slack workspace ${tenantWorkspace?.team_id}` : null,
@@ -605,7 +600,7 @@ export async function provisionTenant(input: {
     );
     if (input.replacePairing) {
       if (tenantWorkspace && tenantWorkspace.team_id !== slack.teamId) {
-        await sql`select pg_advisory_xact_lock(hashtextextended(${`team-route:${tenantWorkspace.team_id}`}, 0))`.execute(trx);
+        await lockTeamChannelRoute(trx, tenantWorkspace.team_id);
         await trx.deleteFrom("channel_settings").where("team_id", "=", tenantWorkspace.team_id).execute();
         await trx.deleteFrom("team_channel_routes").where("team_id", "=", tenantWorkspace.team_id).execute();
       }
@@ -623,9 +618,6 @@ export async function provisionTenant(input: {
       }
     } else if (tenantInstallation && tenantInstallation.installation_id !== repository.installationId) {
       // Same account/tenant with a new installation is a normal reinstall.
-      if (tenantInstallation.github_account_id !== repository.githubAccountId) {
-        throw new Error("Tenant is already paired to a different GitHub account");
-      }
       await trx.deleteFrom("github_installations").where("tenant_id", "=", tenantId).execute();
     }
 
@@ -663,13 +655,7 @@ export async function provisionTenant(input: {
       }))
       .execute();
     if (selectedChannelId !== null) {
-      await trx
-        .insertInto("team_channel_routes")
-        .values({ team_id: slack.teamId, selected_channel_id: selectedChannelId })
-        .onConflict((oc) =>
-          oc.column("team_id").doUpdateSet({ selected_channel_id: selectedChannelId! }),
-        )
-        .execute();
+      await writeSelectedChannel(trx, slack.teamId, selectedChannelId);
     }
     await trx
       .insertInto("github_installations")

@@ -76,5 +76,6 @@ export interface DB {
   team_channel_routes: TeamChannelRoutesTable;
   tenants: TenantsTable;
   slack_workspaces: SlackWorkspacesTable;
+  slack_token_encryption_key: { id: number; verifier: string };
   github_installations: GitHubInstallationsTable;
 }
