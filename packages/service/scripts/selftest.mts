@@ -55,6 +55,7 @@ const env: ServiceEnv = {
   databaseUrl: testUrl,
   githubAppId: "",
   githubPrivateKey: "",
+  slackOAuth: null,
   slackSigningSecret: "slack-secret",
   slackTokenEncryptionKey: Buffer.alloc(32, 7),
   githubOidcIssuer: "https://token.actions.githubusercontent.com",
@@ -724,6 +725,9 @@ try {
         /channel_settings_mention_audience_check/,
       );
       await constraintClient.end();
+
+      const downOAuth = await migrator.migrateTo("0008_multitenant_expand");
+      if (downOAuth.error) throw downOAuth.error;
 
       // 0008.down() refuses to make legacy names non-null when a newer row
       // cannot be represented by the compatibility runtime.
