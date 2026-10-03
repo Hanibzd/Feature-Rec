@@ -4,7 +4,7 @@ inputs:
   api-url:
     description: Public URL for a self-hosted Feature-Rec backend.
     required: false
-    default: https://feature-rec-production.up.railway.app
+    default: https://api.feature-rec.com
 runs:
   using: composite
   steps:
