@@ -3,8 +3,6 @@ import { Kysely, PostgresDialect } from "kysely";
 import { Migrator } from "kysely/migration";
 import { Pool } from "pg";
 import {
-  backfillMultitenancy,
-  prepareRollbackToA,
   provisionTenant,
   validateMultitenancy,
   type AdminProviders,
@@ -27,16 +25,12 @@ Usage:
     [--expect-current <migration>]
     (downgrades also require --expect-current, --service-stopped and --traffic-paused)
   node dist/admin.js validate-contract-readiness --environment <name> [--require-future-cycle-keys]
-  node dist/admin.js backfill-multitenancy --environment <name> (--dry-run | --apply --confirm)
-    [--tenant-id <uuid>] [--rebuild-cycle-keys --traffic-paused]
   node dist/admin.js provision-tenant --environment <name> --confirm
     --installation-id <id> --repository <owner/repo> [--tenant-id <uuid>]
     [--selected-channel-id <id>] [--replace-pairing] [--slack-installation-id <uuid>]
     (without --slack-installation-id, reads the Slack bot token from a non-echoing TTY prompt or stdin)
   node dist/admin.js slack-installation-status --environment <name> --slack-installation-id <uuid>
   node dist/admin.js cancel-slack-installation --environment <name> --confirm --slack-installation-id <uuid>
-  node dist/admin.js prepare-rollback-to-a --environment <name> (--dry-run | --apply --confirm)
-    [--traffic-paused]
 
 Run production commands inside Railway with:
   railway ssh -- node dist/admin.js <subcommand> ...
@@ -77,14 +71,6 @@ function requireConfirmation(args: ParsedArgs): void {
   if (!boolFlag(args, "confirm")) throw new Error("This write requires --confirm");
 }
 
-function requireMode(args: ParsedArgs): { apply: boolean } {
-  const dryRun = boolFlag(args, "dry-run");
-  const apply = boolFlag(args, "apply");
-  if (dryRun === apply) throw new Error("Choose exactly one of --dry-run or --apply");
-  if (apply) requireConfirmation(args);
-  return { apply };
-}
-
 function requireEncryptionKey(env: ServiceEnv): Buffer {
   if (!env.slackTokenEncryptionKey) {
     throw new Error("FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY is required for this command");
@@ -109,7 +95,6 @@ function providers(env: ServiceEnv): AdminProviders {
       ]);
       return { teamId: identity.teamId, botUserId: identity.userId, channelIds };
     },
-    resolveRepository: (owner, repo) => github.resolveRepository(owner, repo),
     inspectInstallationRepository: (installationId, owner, repo) =>
       github.inspectInstallationRepository(installationId, owner, repo),
   };
@@ -176,18 +161,6 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (args.command === "prepare-rollback-to-a") {
-      const mode = requireMode(args);
-      const report = await prepareRollbackToA({
-        db,
-        apply: mode.apply,
-        trafficPaused: boolFlag(args, "traffic-paused"),
-      });
-      print(environment, report);
-      if (!report.ok) process.exitCode = 1;
-      return;
-    }
-
     if (args.command === "slack-installation-status" || args.command === "cancel-slack-installation") {
       const id = requireFlag(args, "slack-installation-id");
       if (!z.string().uuid().safeParse(id).success) throw new Error("--slack-installation-id must be a UUID");
@@ -213,23 +186,6 @@ async function main(): Promise<void> {
       });
       print(environment, report);
       if (!report.ok) process.exitCode = 1;
-      return;
-    }
-
-    if (args.command === "backfill-multitenancy") {
-      const mode = requireMode(args);
-      const report = await backfillMultitenancy({
-        db,
-        providers: providers(env),
-        slackBotToken: process.env.SLACK_BOT_TOKEN ?? "",
-        encryptionKey: requireEncryptionKey(env),
-        tenantId: flag(args, "tenant-id"),
-        apply: mode.apply,
-        rebuildCycleKeys: boolFlag(args, "rebuild-cycle-keys"),
-        trafficPaused: boolFlag(args, "traffic-paused"),
-      });
-      print(environment, report);
-      if (report.issues.length > 0 || (report.validation && !report.validation.ok)) process.exitCode = 1;
       return;
     }
 

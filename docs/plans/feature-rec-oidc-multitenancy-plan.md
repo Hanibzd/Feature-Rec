@@ -1,6 +1,6 @@
 # Feature-Rec OIDC and Multitenancy Dev Plan
 
-Status: PR A/B complete and deployed; PR B2 milestones 1–6 and local packaging/rollback verified, live hosted verification pending; PR C implemented but release gated on B2 and two-workspace validation; PR D contract pending
+Status: PR A/B/B2 merged; B2 live hosted verification pending; PR C integrated onto B2 with `0010_multitenant_enforce`, release gated on two-workspace validation, observation and a fresh backup; PR D contract pending
 
 Date: 2026-09-03
 
@@ -20,10 +20,13 @@ compiled-admin/health smoke tests against isolated PostgreSQL. Production
 backfill/cutover and the real two-tenant smoke remain operator release steps.
 
 PR C implemented: 2026-09-08, preserved in commit `cb34cc8` on
-`feat/oidc-multitenancy-pr-c`. Its current migration
-`0009_multitenant_enforce` must be renamed to `0010_multitenant_enforce` when
-integrating B2, which now owns additive migration `0009`. That source rename is
-not part of this plan-only amendment. The existing enforcement migration refuses null
+`feat/oidc-multitenancy-pr-c`. Integrated onto merged B2 on 2026-10-03: the
+enforcement migration is now `0010_multitenant_enforce`, after B2's additive
+`0009_slack_oauth_installations`, and `0011_multitenant_contract` is reserved
+for D. B2 tests, the image rollback harness and runbooks now cover C-to-B2.
+Provisioning without `--selected-channel-id` falls back to the Slack team's own
+row, replacing B's legacy-route fallback, so `--replace-pairing` keeps a moved
+workspace's routing. The enforcement migration refuses null
 cycle identity and orphan channel settings, sets both review-cycle identity
 columns `NOT NULL`, and adds the named `channel_settings_team_id_fkey` cascade;
 its `down()` reverses only those constraints. The release stops every legacy
@@ -1211,7 +1214,9 @@ Targets:
   singleton/data qualification described above.
 - B2 to B: cancel pending installations and migrate to
   `0008_multitenant_expand` using artifact B2 before starting B.
-- C to B2: migrate to `0009_slack_oauth_installations` using artifact C.
+- C to B2: migrate to `0009_slack_oauth_installations` using artifact C, then
+  reconcile the frozen `team_channel_routes` table with `slack_workspaces` before
+  starting B2, which resumes reading and dual-writing it.
 - C to original B: after the pending-installation precautions, migrate to
   `0008_multitenant_expand` using artifact C; this also removes B2 session storage.
 - D to C: migrate to `0010_multitenant_enforce` using artifact D.
@@ -2592,3 +2597,27 @@ Resolved documentation-only publication issues: removed a personal machine path 
 transient test-session identifiers from the review record, paraphrased conversational
 attribution in the B2 decision history, and qualified no-PR statements as review-time
 history. The technical decisions and remaining hosted release gates are unchanged.
+
+## PR C integration review — 2026-10-03
+
+C (`cb34cc8`) was integrated onto merged B2 and reviewed against this plan and the
+repository standards. All issues below are resolved in the integration change:
+
+- **Migration ordering (resolved).** Kysely orders migrations by name, so the old
+  `0009_multitenant_enforce` sorted before B2's `0009_slack_oauth_installations` and
+  ran first. Renamed to `0010_multitenant_enforce`; tests walk `0008` → `0009` →
+  `0010` forward/down/forward and prove artifacts B and B2 refuse a `0010` database.
+- **Re-pair routing regression (resolved).** Removing B's legacy-route fallback made
+  `--replace-pairing` drop a moved workspace's selected channel while keeping its
+  settings. Provisioning now falls back to the Slack team's own row.
+- **C-to-B2 route drift (resolved).** B2 resumes reading and dual-writing the frozen
+  routes table. The runbook adds a reconciliation transaction, verified once against
+  B2's route-drift query; the table is frozen until D, so the SQL cannot drift.
+- **Explicit delete coverage (resolved).** A storage test drops the cascade FK and
+  proves workspace deletion still removes settings; removing the explicit delete fails it.
+- **Runbook consistency (resolved).** The runbook states C's full release gate and
+  second observation window, and that the newest artifact may run every older down
+  step. Migration errors name their row counts and the readiness command.
+- **Open (release gates, not code).** B2 hosted two-workspace verification, the first
+  observation window, a clean readiness report and a fresh backup remain required
+  before merging C.

@@ -231,7 +231,6 @@ try {
   assert.equal(cycleA?.repositoryId, "101");
   assert.equal(cycleA?.prAuthor, "github-author");
   assert.equal(cycleA?.prTitle, "GitHub title");
-  assert.equal(cycleA?.owner, "Acme", "compatibility names are written from authorized GitHub metadata");
   assert.equal((await start("A")).json().duplicate, true);
   for (const action of ["accepted", "failed", "video"] as const) {
     assert.equal((await result(b.cycleId, b.attemptId, "A", action)).statusCode, 403);
@@ -678,7 +677,8 @@ try {
   assert.equal((await store.getSlackWorkspaceByTeamId("TA"))?.enabled, true);
   revokedTokens.add("replacement-A");
 
-  // Lifecycle events are signed, target one team, and remove pre-FK settings.
+  // Lifecycle events are signed, target one team, and remove that team's
+  // settings (explicit delete, with the 0010 cascade FK as backstop).
   await store.setSelectedChannelApprovers({ teamId: "TA", expectedChannelId: "CA", approvers: ["U1"], updatedBy: "U1" });
   const unsigned = await app.inject({ method: "POST", url: "/api/slack/events", payload: { type: "event_callback", team_id: "TA", event: { type: "app_uninstalled" } } });
   assert.equal(unsigned.statusCode, 401);

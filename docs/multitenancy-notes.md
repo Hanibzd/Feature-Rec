@@ -1,27 +1,27 @@
 # Multitenancy Notes
 
-## Current contract after deploy B
+## Current contract after deploy C
 
 The singleton designs below are historical and are superseded by the
 [OIDC and multitenancy plan](plans/feature-rec-oidc-multitenancy-plan.md).
 Tenants are UUID product boundaries, each with one GitHub account/installation and one Slack workspace.
 All runner calls verify GitHub OIDC, resolve the enabled tenant, and mint a live repository-scoped
 installation token. Cycles, locks, supersession, and guarded transitions use tenant/repository IDs.
-Repository names are transient GitHub coordinates, with legacy compatibility writes retained only
-for B's qualified singleton rollback window.
+Repository names are transient GitHub coordinates only: deploy C stopped every legacy read/write, so
+new cycles carry no `owner`/`repo` values and nothing touches `team_channel_routes`. The physical
+legacy columns and table remain, inert, until the deploy-D contract drops them.
 
 Every Slack Web API operation uses the token decrypted from the selected workspace row. Signed
 workspace IDs have no global fallback, and approval payloads must match the cycle tenant's workspace.
 The persisted bot user ID is refreshed by provisioning `auth.test`; normal membership events compare
-it before decrypting or calling Slack. `slack_workspaces.selected_channel_id` owns routing. B keeps
-legacy route dual writes, but does not read legacy rows as runtime authority. Lifecycle deletion
-explicitly removes team settings and disables the tenant even before the later cascade migration.
+it before decrypting or calling Slack. `slack_workspaces.selected_channel_id` owns routing. Lifecycle
+deletion explicitly removes team settings and disables the tenant; since `0010_multitenant_enforce`,
+the `channel_settings_team_id_fkey` `ON DELETE CASCADE` also backstops that cleanup at the database.
 
 The release boundaries remain separate: A expands, B cuts over, B2 adds Slack OAuth installation,
-C enforces/stops legacy writes, and D contracts. The retained B artifact stops at `0008`; this B2
-checkout registers additive `0009_slack_oauth_installations` and retains all B compatibility behavior.
-C's enforcement must become `0010` and D's contract `0011` when the separate unshipped work is
-integrated; this step does not rename that branch or establish production's migration state.
+C enforces/stops legacy writes, and D contracts. Deploying C remains gated on B2's live verification
+in two real workspaces; the [migration and rollback runbook](setup-and-operations.md#backup-rollback-and-migration)
+owns the migration sequence, release gates and rollback procedures.
 
 B2 provides hosted Slack OAuth routes, SDK configuration and
 [persistent OAuth storage](setup-and-operations.md#persistent-installation-storage). Session secrets
@@ -31,15 +31,7 @@ runtime work or replace an active token. Consumption requires a transaction with
 integrations and the exact validated active/pending ciphertext, records the result identifiers and clears the pending
 ciphertext. Operator commands provision by pending installation ID, inspect sanitized
 status, and cancel abandoned records. Manual token input remains supported. Pending
-records have no local expiry; OAuth sessions expire after ten minutes. Live hosted
-verification in two real workspaces remains a release gate.
-
-Later schema rollback must run the newer artifact's targeted down migration before starting the
-older artifact. B2-to-B drops only temporary OAuth storage after all unconsumed records have been
-cancelled (or, for OAuth sessions, expired through cleanup), preserving active tenants/integrations and the key verifier.
-C-to-B2 preserves OAuth storage. B-to-A remains limited to a validated singleton or a pre-cutover
-restore, after B2-to-B if needed. See the
-[migration and rollback runbook](setup-and-operations.md#backup-rollback-and-migration).
+records have no local expiry; OAuth sessions expire after ten minutes.
 
 ## Historical singleton notes
 
@@ -166,5 +158,7 @@ Safe deployment order:
 3. Add multitenant plumbing without exposing GitHub routing under legacy auth.
 4. Add OIDC plus installation authorization and cut the action/backend over as
    one release; switch cycle identity, locks, and supersession atomically.
-5. Observe and reconcile; enforce the new non-null invariants.
+5. Observe and reconcile; enforce the new non-null invariants. (Landed as
+   deploy C / `0010_multitenant_enforce`.)
 6. In a later contract deployment, remove legacy columns, tables, and secrets.
+   (Deploy D, pending.)

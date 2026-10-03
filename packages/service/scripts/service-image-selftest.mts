@@ -136,28 +136,37 @@ try {
   const status = (await admin(["slack-installation-status", "--slack-installation-id", pendingId])).stdout;
   sanitized(status);
   assert.equal((JSON.parse(status) as { installation: { status: string } }).installation.status, "pending");
-  const downArgs = ["migrate-to", "0008_multitenant_expand", "--expect-current", "0009_slack_oauth_installations", "--service-stopped", "--traffic-paused", "--confirm"];
-  await assert.rejects(admin(downArgs), /Cancel pending Slack OAuth installations/);
+  const latestMigration = async () =>
+    (await db.query<{ name: string }>("select name from kysely_migration order by name desc limit 1")).rows[0].name;
+  assert.equal(await latestMigration(), "0010_multitenant_enforce");
+  if (previousImage) {
+    const incompatible = await start([], previousImage);
+    await exited(incompatible);
+    const logs = await docker(["logs", incompatible]);
+    assert.match(logs.stdout + logs.stderr, /previously executed migration 0010_multitenant_enforce is missing/i);
+  }
+  // C-to-B2 keeps OAuth storage, including the pending installation.
+  await admin(["migrate-to", "0009_slack_oauth_installations", "--expect-current", "0010_multitenant_enforce", "--service-stopped", "--traffic-paused", "--confirm"]);
+  assert.equal(await latestMigration(), "0009_slack_oauth_installations");
+  assert.equal((JSON.parse((await admin(["slack-installation-status", "--slack-installation-id", pendingId])).stdout) as { installation: { status: string } }).installation.status, "pending");
+  // B2-to-B refuses until every unconsumed installation is cancelled.
+  const downToB = ["migrate-to", "0008_multitenant_expand", "--expect-current", "0009_slack_oauth_installations", "--service-stopped", "--traffic-paused", "--confirm"];
+  await assert.rejects(admin(downToB), /Cancel pending Slack OAuth installations/);
   for (const row of (await db.query<{ id: string }>("select id from slack_oauth_installations where status in ('awaiting_callback', 'exchanging', 'pending')")).rows) {
     const result = (await admin(["cancel-slack-installation", "--slack-installation-id", row.id, "--confirm"])).stdout;
     sanitized(result);
     assert.equal((JSON.parse(result) as { cancelled: boolean }).cancelled, true);
   }
   assert.equal((await db.query<{ count: string }>("select count(*) from slack_oauth_installations where state_hash is not null or browser_binding_hash is not null or bot_token_ciphertext is not null")).rows[0].count, "0");
-  if (previousImage) {
-    const incompatible = await start([], previousImage);
-    await exited(incompatible);
-    const logs = await docker(["logs", incompatible]);
-    assert.match(logs.stdout + logs.stderr, /previously executed migration 0009_slack_oauth_installations is missing/i);
-  }
-  await admin(downArgs);
-  assert.equal((await db.query<{ name: string }>("select name from kysely_migration order by name desc limit 1")).rows[0].name, "0008_multitenant_expand");
+  // The raw pending fixture has no key verifier, so B2 can only start once it is cancelled.
   if (previousImage) {
     const previous = await start([], previousImage);
     await healthy(previous);
     await stop(previous);
   }
-  await admin(["migrate-to", "0009_slack_oauth_installations", "--expect-current", "0008_multitenant_expand", "--confirm"]);
+  await admin(downToB);
+  assert.equal(await latestMigration(), "0008_multitenant_expand");
+  await admin(["migrate-to", "0010_multitenant_enforce", "--expect-current", "0008_multitenant_expand", "--confirm"]);
   const final = await start(oauthEnv);
   await healthy(final);
   await stop(final);
@@ -165,7 +174,7 @@ try {
     const logs = await docker(["logs", name]);
     sanitized(logs.stdout + logs.stderr);
   }
-  console.log(`Service image selftest passed: configured/disabled health, redirect/cookies, partial configuration, compiled admin, cancellation and 0009/0008/0009${previousImage ? ", retained B image" : " (retained B image not supplied)"}.`);
+  console.log(`Service image selftest passed: configured/disabled health, redirect/cookies, partial configuration, compiled admin, cancellation and 0010/0009/0008/0010${previousImage ? ", retained B2 image" : " (retained B2 image not supplied)"}.`);
 } catch (error) {
   // Capture evidence before cleanup, without leaking fixtures or masking the test failure.
   for (const name of containers) {
