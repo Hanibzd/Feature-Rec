@@ -457,16 +457,17 @@ and 60 seconds of graceful draining for in-flight uploads and external API calls
 After the public origin is stable, configure:
 
 ```text
-FEATURE_REC_BASE_URL=https://feature-rec-production.up.railway.app
-Slack Interactivity Request URL=https://feature-rec-production.up.railway.app/api/slack/interactivity
-Slack Events Request URL=https://feature-rec-production.up.railway.app/api/slack/events
-Slack Slash Command URL=https://feature-rec-production.up.railway.app/api/slack/commands
-Hosted action default=https://feature-rec-production.up.railway.app
+FEATURE_REC_BASE_URL=https://api.feature-rec.com
+Slack Interactivity Request URL=https://api.feature-rec.com/api/slack/interactivity
+Slack Events Request URL=https://api.feature-rec.com/api/slack/events
+Slack Slash Command URL=https://api.feature-rec.com/api/slack/commands
+Hosted action default=https://api.feature-rec.com
 ```
 
-This generated Railway hostname is temporary. Before customer workflows depend on it, attach
-`api.feature-rec.com` through Railway Custom Domains, change the action default to
-`https://api.feature-rec.com`, and keep the Railway hostname available during the transition.
+Before using this hosted configuration, attach `api.feature-rec.com` through Railway Custom Domains.
+Coordinate `FEATURE_REC_BASE_URL` with the Action's `api-url` and consumer overrides or pinned
+revisions: the backend's OIDC audience must match the Action's API URL. Keep the generated Railway
+hostname available during the transition.
 
 Seal app-level credentials and the Slack token encryption key in Railway where available. Slack bot
 tokens live encrypted in PostgreSQL, one per workspace; provision them through the admin command's
