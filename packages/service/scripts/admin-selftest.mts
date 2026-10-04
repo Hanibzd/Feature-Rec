@@ -112,11 +112,11 @@ try {
     timeout: 10_000,
   });
   const status = JSON.parse((await runAdmin(["migration-status"])).stdout);
-  assert.equal(status.migrations.at(-1).name, "0010_multitenant_enforce");
+  assert.equal(status.migrations.at(-1).name, "0011_multitenant_contract");
   assert.equal(status.migrations.at(-1).status, "executed");
   for (const missing of ["--expect-current", "--service-stopped", "--traffic-paused"]) {
     const flags = ["--confirm", "--service-stopped", "--traffic-paused"];
-    if (missing !== "--expect-current") flags.push("--expect-current", "0010_multitenant_enforce");
+    if (missing !== "--expect-current") flags.push("--expect-current", "0011_multitenant_contract");
     await assert.rejects(runAdmin(["migrate-to", "0007_mention_modes", ...flags.filter((flag) => flag !== missing)]), /Schema downgrade requires/);
     assert.equal(JSON.parse((await runAdmin(["migration-status"])).stdout).migrations.at(-1).status, "executed");
   }
@@ -126,7 +126,7 @@ try {
   await migrationBlocker.connect();
   try {
     await migrationBlocker.query("select pg_advisory_lock(hashtextextended('feature-rec-migrations', 0))");
-    const competing = Promise.allSettled([0, 1].map(() => runAdmin(["migrate-to", "0007_mention_modes", "--confirm", "--expect-current", "0010_multitenant_enforce", "--service-stopped", "--traffic-paused"])));
+    const competing = Promise.allSettled([0, 1].map(() => runAdmin(["migrate-to", "0007_mention_modes", "--confirm", "--expect-current", "0011_multitenant_contract", "--service-stopped", "--traffic-paused"])));
     try {
       await waitForBlockedQueries(2);
     } finally {
@@ -138,8 +138,8 @@ try {
   } finally {
     await migrationBlocker.end();
   }
-  await runAdmin(["migrate-to", "0010_multitenant_enforce", "--confirm", "--expect-current", "0007_mention_modes"]);
-  assert.equal(JSON.parse((await runAdmin(["migration-status"])).stdout).migrations.at(-1).name, "0010_multitenant_enforce");
+  await runAdmin(["migrate-to", "0011_multitenant_contract", "--confirm", "--expect-current", "0007_mention_modes"]);
+  assert.equal(JSON.parse((await runAdmin(["migration-status"])).stdout).migrations.at(-1).name, "0011_multitenant_contract");
   await assert.rejects(runAdmin(["validate-contract-readiness"]), /canonical base64/);
 
   assert.deepEqual(await inspectSlackTokenEncryption(db, null), { keyError: null, invalidPendingInstallations: [], invalidWorkspaces: [] });

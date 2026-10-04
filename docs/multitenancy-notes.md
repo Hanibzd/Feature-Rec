@@ -1,15 +1,15 @@
 # Multitenancy Notes
 
-## Current contract after deploy C
+## Current contract after deploy D
 
 The singleton designs below are historical and are superseded by the
 [OIDC and multitenancy plan](plans/feature-rec-oidc-multitenancy-plan.md).
 Tenants are UUID product boundaries, each with one GitHub account/installation and one Slack workspace.
 All runner calls verify GitHub OIDC, resolve the enabled tenant, and mint a live repository-scoped
 installation token. Cycles, locks, supersession, and guarded transitions use tenant/repository IDs.
-Repository names are transient GitHub coordinates only: deploy C stopped every legacy read/write, so
-new cycles carry no `owner`/`repo` values and nothing touches `team_channel_routes`. The physical
-legacy columns and table remain, inert, until the deploy-D contract drops them.
+Repository names are transient GitHub coordinates only: deploy C stopped every legacy read/write, and
+deploy D's `0011_multitenant_contract` dropped `team_channel_routes` and the `review_cycles`
+`owner`, `repo`, `config_hash` and `config_json` columns.
 
 Every Slack Web API operation uses the token decrypted from the selected workspace row. Signed
 workspace IDs have no global fallback, and approval payloads must match the cycle tenant's workspace.
@@ -19,9 +19,9 @@ deletion explicitly removes team settings and disables the tenant; since `0010_m
 the `channel_settings_team_id_fkey` `ON DELETE CASCADE` also backstops that cleanup at the database.
 
 The release boundaries remain separate: A expands, B cuts over, B2 adds Slack OAuth installation,
-C enforces/stops legacy writes, and D contracts. Deploying C remains gated on B2's live verification
-in two real workspaces; the [migration and rollback runbook](setup-and-operations.md#backup-rollback-and-migration)
-owns the migration sequence, release gates and rollback procedures.
+C enforces/stops legacy writes, and D contracts. The
+[migration and rollback runbook](setup-and-operations.md#backup-rollback-and-migration) owns the
+migration sequence, release gates and rollback procedures.
 
 B2 provides hosted Slack OAuth routes, SDK configuration and
 [persistent OAuth storage](setup-and-operations.md#persistent-installation-storage). Session secrets
@@ -161,4 +161,4 @@ Safe deployment order:
 5. Observe and reconcile; enforce the new non-null invariants. (Landed as
    deploy C / `0010_multitenant_enforce`.)
 6. In a later contract deployment, remove legacy columns, tables, and secrets.
-   (Deploy D, pending.)
+   (Landed as deploy D / `0011_multitenant_contract`.)

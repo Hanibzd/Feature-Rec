@@ -119,7 +119,7 @@ try {
   const migrator = new Migrator({ db, provider: migrationProvider });
   const migrated = await migrator.migrateToLatest();
   if (migrated.error) throw migrated.error;
-  assert.equal(Object.keys(await migrationProvider.getMigrations()).sort().at(-1), "0010_multitenant_enforce");
+  assert.equal(Object.keys(await migrationProvider.getMigrations()).sort().at(-1), "0011_multitenant_contract");
   assert.deepEqual(await inspectSlackTokenEncryption(db, null), { keyError: null, invalidWorkspaces: [], invalidPendingInstallations: [] });
 
   const first = await createSlackOAuthSession(db);

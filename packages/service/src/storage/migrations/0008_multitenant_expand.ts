@@ -69,6 +69,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     .execute();
 }
 
+// Pre-cutover binaries need every cycle's repository names. Cycles written by
+// deploy C have none and 0011_multitenant_contract deletes the rest, so once the
+// contract has run this refuses whenever any cycle exists; recover deploy A
+// from the pre-cutover backup instead.
 export async function down(db: Kysely<unknown>): Promise<void> {
   const legacyNulls = await sql<{ count: string }>`
     select count(*)::text as count

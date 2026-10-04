@@ -1,6 +1,6 @@
 # Feature-Rec OIDC and Multitenancy Dev Plan
 
-Status: PR A/B/B2 merged; B2 live hosted verification pending; PR C integrated onto B2 with `0010_multitenant_enforce`, release gated on two-workspace validation, observation and a fresh backup; PR D contract pending
+Status: PR A/B/B2/C merged; PR D contract implemented with `0011_multitenant_contract`, release gated on C serving, a clean second observation window and readiness report, and a fresh backup
 
 Date: 2026-09-03
 
@@ -41,6 +41,18 @@ artifacts. Physical legacy columns and `team_channel_routes` stay untouched for
 the PR D contract. Deploying C and the second observation window remain operator
 release steps. PR C development may continue in parallel, but its merge/deploy
 must wait for PR B2 and the first observation/readiness gate below.
+
+PR D implemented: 2026-10-04. `0011_multitenant_contract` drops `team_channel_routes`
+and `review_cycles.owner`, `repo`, `config_hash` and `config_json`; its `down()`
+recreates only the empty table and nullable columns. Deploy C had already removed
+every schema type, data access path, backfill/A-rollback tool and synchronization
+validator for them, so D's code change is the migration, comments stating that
+pre-cutover binaries are no longer rollback-compatible, and contracted-schema tests.
+Tests walk `0008` through `0011` forward/down/forward, prove artifact C refuses an
+`0011` database and starts after D's `migrate-to 0010`, and the image harness
+covers D-to-C with an optional retained C image. The runbook adds D's release gate,
+a `0010` preflight, D-to-C rollback and deletion of the sealed hosted secrets after
+D is healthy. Merging D and deleting those secrets remain operator release steps.
 
 Scope: `packages/core`, `packages/action`, `packages/service`, migrations,
 operator tooling, CI, and product documentation
@@ -2631,3 +2643,61 @@ repository standards. All issues below are resolved in the integration change:
 - **Open (release gates, not code).** B2 hosted two-workspace verification, the first
   observation window, a clean readiness report and a fresh backup remain required
   before merging C.
+
+## PR D implementation — 2026-10-04
+
+D was implemented on merged C and checked against this plan's contract section and
+test plan. Decisions and issues:
+
+- **Remaining cleanup scope (resolved).** C already removed the legacy schema types,
+  data access, backfill/A-rollback tooling and the route-drift validator, so D removes
+  only the physical schema plus the tests that wrote to it. `lockTeamChannelRoute` and
+  `initializeTeamChannelRoute` name the workspace selection concept, not the dropped
+  table; the advisory-lock key stays identical so C and D processes serialize together
+  during the deploy. `validate-contract-readiness --require-future-cycle-keys` stays as
+  a canonical cycle-key integrity check that does not touch dropped schema.
+- **Readiness before contract (resolved by ordering).** `0011` adds no guard of its own:
+  `0010`'s refusals are the readiness gate, and both run in one migration transaction. A
+  test proves D's `migrateToLatest()` against an unready `0009` database applies neither
+  migration and leaves the legacy table and columns intact.
+- **C and D collapsing into one startup (resolved procedurally, open as a code guard).**
+  On a database still at `0009` (for example after a C-to-B2 rollback), D's startup would
+  apply `0010` and `0011` together while B2, which still reads and writes the legacy schema,
+  serves. The runbook requires `migration-status` to show `0010_multitenant_enforce` before
+  merging D. A code guard could refuse `0011` when `0010` was recorded in the same
+  transaction and legacy routes hold data. It was not added: fresh databases legitimately
+  apply both together, and C has already merged.
+- **Image harness (resolved).** The optional retained image is now C: it must refuse
+  `0011` and start after D's `migrate-to 0010`. The pending-installation fixture is staged
+  after that start because it has no key verifier. Pending-installation survival through
+  `0011` and `0010` downs is covered by the database selftest.
+- **Open (release gates, not code).** C serving, a clean second observation window and
+  readiness report, and a fresh backup before merging D. After D is healthy, the operator
+  deletes the sealed hosted runner, Slack and direct GitHub tokens and rehearses D-to-C in
+  staging.
+
+### PR D standards/spec review — 2026-10-04
+
+Resolved in the D change:
+
+- **`if exists` on destructive drops.** The column drops now use Kysely's `ifExists`
+  like the table drop, per the rollback runbook rule above.
+- **Pre-expansion rollback wording.** The runbook now says `0008`'s `down()` refuses once
+  C has written a cycle, and always after D's contract, so that path needs the backup.
+- **D-to-B2 path.** The runbook continues D-to-C directly into C-to-B2 without starting C.
+  B2-to-B accepts B2's or any newer admin artifact.
+- **Test hygiene.** One relation-existence helper replaces the duplicated `to_regclass`
+  queries. A stale storage-test comment now matches its assertion. A redundant
+  backup-restore sentence was removed from the B-to-A paragraph.
+
+Accepted or open:
+
+- **No in-migration readiness guard (accepted).** See the decision above. The test proves
+  an unready `0009` database gets neither migration and keeps its legacy schema.
+- **Latest migration name hard-coded in five selftests (open, pre-existing).** Every new
+  migration edits them. Deriving it from the provider would weaken the frozen-name checks.
+- **Retained-image coverage (accepted).** The real-binary harness check now targets C. B2
+  and B refusal remain covered by in-process static-provider tests.
+- **B2 live-verification wording (open).** The status line now lists only merged PRs. The
+  B2 section still calls two-workspace installation a release gate. Confirm the
+  recorded outcome of that gate before editing that section.

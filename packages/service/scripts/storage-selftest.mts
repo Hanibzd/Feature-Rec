@@ -36,8 +36,21 @@ function start(overrides: Partial<StartCycleInput> = {}): StartCycleInput {
 }
 
 try {
-  assert.equal(Object.keys(await migrationProvider.getMigrations()).sort().at(-1), "0010_multitenant_enforce");
+  assert.equal(Object.keys(await migrationProvider.getMigrations()).sort().at(-1), "0011_multitenant_contract");
   await store.init();
+
+  // 0011 contract: the legacy route table and repository-name/config columns
+  // are physically gone, so no SQL path can read or write them.
+  assert.equal(
+    (await sql<{ relation: string | null }>`select to_regclass('public.team_channel_routes')::text as relation`.execute(db)).rows[0]?.relation,
+    null,
+  );
+  assert.deepEqual(
+    (await sql<{ column_name: string }>`
+      select column_name from information_schema.columns
+      where table_name = 'review_cycles' and column_name in ('owner', 'repo', 'config_hash', 'config_json')`.execute(db)).rows,
+    [],
+  );
 
   // 0010 enforcement holds at the database level: cycles without authenticated
   // identity and channel settings without an installed workspace are rejected.
@@ -76,10 +89,6 @@ try {
   const active = first.created ? first : duplicate;
   assert.equal(active.cycle.repositoryId, repositoryId);
   assert.equal(active.cycle.cycleKey, `${tenantA}/${repositoryId}#1:first-head`);
-  // C-written rows never carry legacy repository names, even at the SQL level.
-  const legacyNames = await sql<{ owner: string | null; repo: string | null }>`
-    select owner, repo from review_cycles where id = ${active.cycle.id}`.execute(db);
-  assert.deepEqual(legacyNames.rows[0], { owner: null, repo: null });
 
   const otherTenant = await store.startCycle(start({ tenantId: tenantB }));
   const otherRepository = await store.startCycle(start({ repositoryId: "42" }));
@@ -125,10 +134,8 @@ try {
 
   assert.equal((await store.getCycleByKey(newer.cycle.cycleKey))?.repositoryId, "42");
 
-  // Legacy routes never supply runtime routing authority after cutover. Raw SQL:
-  // the physical table survives until the 0011 contract but has no schema type.
-  await sql`insert into team_channel_routes (team_id, selected_channel_id)
-    values ('TA', 'CLEGACY'), ('UNKNOWN', 'CUNSAFE')`.execute(db);
+  // Routing is only a workspace row's own selection: TA has not selected one
+  // yet, and a team without a workspace row can neither read nor write one.
   assert.equal(await store.getSelectedChannelId("TA"), null);
   assert.equal(await store.getSelectedChannelId("UNKNOWN"), null);
   await assert.rejects(store.selectTeamChannel({ teamId: "UNKNOWN", channelId: "CNEW" }), /no longer installed/);
@@ -136,10 +143,6 @@ try {
   assert.equal(initialized.filter((result) => result.initializedRoute).length, 1);
   await Promise.all(["CA3", "CA4"].map((channelId) => store.selectTeamChannel({ teamId: "TA", channelId })));
   const channelA = (await store.getSelectedChannelId("TA"))!;
-  // Selection changes stop propagating to the legacy table entirely.
-  const legacyRoute = await sql<{ selected_channel_id: string }>`
-    select selected_channel_id from team_channel_routes where team_id = 'TA'`.execute(db);
-  assert.equal(legacyRoute.rows[0]?.selected_channel_id, "CLEGACY");
   assert.equal(await store.setSelectedChannelApprovers({ teamId: "TA", expectedChannelId: "CSTALE", approvers: ["UWRONG"], updatedBy: "UA" }), false);
   assert.equal(await store.setSelectedChannelApprovers({ teamId: "TA", expectedChannelId: channelA, approvers: ["UA"], updatedBy: "UA" }), true);
   await store.selectTeamChannel({ teamId: "TB", channelId: "CB" });

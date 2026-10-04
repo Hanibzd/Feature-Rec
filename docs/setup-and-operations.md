@@ -204,8 +204,8 @@ channel is unavailable when a validation is ready, no Slack message is posted an
 fails with instructions to re-invite the bot or select another channel.
 
 `slack_workspaces.selected_channel_id` is the persistent routing source of truth, with one selected
-channel per tenant workspace. Deploy C stopped the deploy-B dual write to `team_channel_routes`; the
-legacy table physically remains, unread and unwritten, until the deploy-D contract drops it.
+channel per tenant workspace. Deploy C stopped the deploy-B dual write to `team_channel_routes`,
+and deploy D's contract dropped that legacy table.
 `channel_settings` is the source of truth for each channel's mention mode, custom mention
 audience, and approver policy. A never-configured channel uses virtual defaults (follow approvers,
 unrestricted approval) without inserting a settings row. Bot membership is read live from Slack for
@@ -508,6 +508,23 @@ command, which re-pairs the row in place. A C-to-B2 rollback drops the cascade b
 B2 provisioning is safe again afterwards. After C is healthy, run a short second observation window
 confirming no SQL or runtime path uses the legacy fields or table before deploy D.
 
+Deploy D registers `0011_multitenant_contract`. It drops `team_channel_routes` and the legacy
+`review_cycles` columns `owner`, `repo`, `config_hash` and `config_json`. Its `down()` recreates
+only the empty table and nullable columns; it never restores historical values, which deploy C
+neither reads nor writes. Pre-cutover binaries are therefore no longer rollback-compatible: once the
+contract has run, `0008`'s `down()` refuses whenever any cycle exists, and recovering deploy A
+requires the pre-cutover backup.
+
+Merge (and therefore deploy) D only after C is the only serving version, its second observation
+window is clean, `validate-contract-readiness` reports no issues, and a fresh backup exists. Before
+merging, confirm with `migration-status` that `0010_multitenant_enforce` is the latest executed
+migration. Deploying D onto a database still at `0009` would apply `0010` and `0011` in one startup
+while B2, which still reads and writes the legacy table and columns, keeps serving. C's serving
+instances can keep running while D migrates because C does not touch the dropped schema. After D is
+healthy, delete the sealed hosted `FEATURE_REC_RUNNER_TOKEN` and `SLACK_BOT_TOKEN` values and any
+hosted `FEATURE_REC_GITHUB_TOKEN` or `GITHUB_TOKEN`. They existed only for the qualified rollback to
+deploy A, which no longer exists.
+
 The image includes the compiled `node dist/admin.js` control plane; it does not depend on `tsx` or
 development dependencies. Production commands require an explicit `--environment` label, and every
 write requires `--confirm`. Run them inside Railway's private network:
@@ -519,8 +536,8 @@ railway ssh -- node dist/admin.js validate-contract-readiness --environment prod
 
 The one-time singleton backfill (`backfill-multitenancy`) and the deploy-A rollback preparation
 (`prepare-rollback-to-a`) were completed before the deploy-B cutover and exist only in the retained
-A/B artifacts; the deploy-C artifact removes them. Contract-readiness validation no longer compares
-legacy and workspace selected-channel values because deploy C stopped the dual write.
+A/B artifacts; the deploy-C and later artifacts omit them. Contract-readiness validation no longer
+compares legacy and workspace selected-channel values because deploy C stopped the dual write.
 
 Generate `FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY` once with `openssl rand -base64 32`, seal it in
 the hosted environment, and keep it stable.
@@ -543,7 +560,31 @@ mismatch; restore the matching backup/key.
 Kysely rejects a recorded migration absent from an older artifact. Always migrate down using the
 newer artifact before starting the older service; do not hand-edit migration records. Roll back one
 wave at a time, newest first. The newest artifact's admin command can run every older down step, so
-artifact C may also perform the B2-to-B downgrade below.
+artifact D may perform each downgrade below.
+
+**D-to-C rollback:**
+
+1. Pause runner/Slack writes, drain in-flight requests, and verify a fresh database backup plus the
+   pinned C artifact. Disable automatic deploys and stop all D service instances through the
+   platform controls. A process kill alone is insufficient with auto-restart.
+2. From a separate maintenance process, use D's compiled admin artifact against the private
+   database, inspect `migration-status`, and run:
+
+   ```bash
+   node dist/admin.js migrate-to 0010_multitenant_enforce --environment production \
+     --expect-current 0011_multitenant_contract --service-stopped --traffic-paused --confirm
+   ```
+
+   `0011`'s `down()` recreates an empty `team_channel_routes` table and empty, nullable legacy
+   `review_cycles` columns. Enforcement constraints, tenant data, OAuth sessions and pending
+   installations remain.
+3. Verify migration status before starting only the pinned C image. Check `/health` and an existing
+   review flow, then resume traffic. Do not restart D, which would reapply `0011`, or restore
+   autodeploys until their target matches the chosen schema.
+
+To continue to B2 without starting C, follow C-to-B2 next with D's or C's artifact. Its
+reconciliation step repopulates the recreated, empty `team_channel_routes` table from
+`slack_workspaces`.
 
 **C-to-B2 rollback:**
 
@@ -560,9 +601,10 @@ artifact C may also perform the B2-to-B downgrade below.
 
    `0010`'s `down()` drops the channel-settings foreign key and both review-cycle `NOT NULL`s
    without touching data. OAuth sessions and pending installations remain.
-3. Deploy C stops maintaining `team_channel_routes`, but B2 reads it as a provisioning fallback,
-   resumes dual-writing it, and reports divergence during readiness validation. Before starting B2,
-   reconcile the frozen table with `slack_workspaces` in one transaction:
+3. Deploy C stops maintaining `team_channel_routes` (after D-to-C it is recreated empty), but B2
+   reads it as a provisioning fallback, resumes dual-writing it, and reports divergence during
+   readiness validation. Before starting B2, reconcile the frozen table with `slack_workspaces` in
+   one transaction:
 
    ```sql
    BEGIN;
@@ -607,8 +649,8 @@ artifact C may also perform the B2-to-B downgrade below.
    `expired` status alone does not prove cleanup changed the stored lifecycle; the
    migration guard checks the stored value. Cancellation also works without the
    encryption key or provider credentials.
-3. From a separate maintenance process, use B2's (or C's) compiled admin artifact against the private
-   database, inspect `migration-status`, and run:
+3. From a separate maintenance process, use B2's (or a newer) compiled admin artifact against the
+   private database, inspect `migration-status`, and run:
 
    ```bash
    node dist/admin.js migrate-to 0008_multitenant_expand --environment production \
@@ -622,8 +664,10 @@ artifact C may also perform the B2-to-B downgrade below.
    review flow, then resume traffic. Do not restart B2, which would reapply `0009`, or restore
    autodeploys until their target matches the chosen schema.
 
-To roll the database back to the pre-expansion schema, first complete C-to-B2 and B2-to-B for each
-applied wave, then use the retained B artifact at `0008`:
+To roll the database back to the pre-expansion schema, first complete D-to-C, C-to-B2 and B2-to-B
+for each applied wave, then use the retained B artifact at `0008`. This only works while every cycle
+still has its legacy repository names. `0008`'s `down()` refuses once deploy C has written a cycle,
+and after D's contract it refuses whenever any cycle exists; restore the pre-cutover backup instead.
 
 1. Pause runner and Slack writes, drain active requests, and verify a fresh database backup and the
    retained older release. Disable automatic deploys and stop all current service instances using
@@ -644,11 +688,7 @@ tenant integrations and the key verifier; retain the backup for recovery.
 B-to-A required no migration down and was allowed only for a validated singleton via the retained
 B artifact's `prepare-rollback-to-a` command; the deploy-C artifact removes that command, and any
 cycle written by deploy C lacks the legacy repository names deploy A needs. After C has served
-traffic, recovering to A means restoring the pre-cutover backup.
-
-Deploy D remains a separate future PR with contract migration `0011_multitenant_contract`. D-to-C
-must migrate down to `0010_multitenant_enforce` using D's admin artifact before starting C. Never
-renumber an applied migration.
+traffic, recovering to A means restoring the pre-cutover backup. Never renumber an applied migration.
 
 ### OIDC cutover checklist
 
@@ -744,10 +784,10 @@ TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres \
   pnpm --filter @feature-rec/service exec tsx scripts/service-image-selftest.mts feature-rec-service:local
 ```
 
-The harness rolls the image's schema back from `0010` through C-to-B2 (pending installations
-survive) and B2-to-B (after cancellation), then forward again. Optionally set
-`PREVIOUS_SERVICE_IMAGE` to a locally retained B2 image to verify that it rejects schema `0010`
-and starts only after downgrade to `0009`. The harness
+The harness rolls the image's schema back from `0011` through D-to-C, C-to-B2 (pending
+installations survive) and B2-to-B (after cancellation), then forward again. Optionally set
+`PREVIOUS_SERVICE_IMAGE` to a locally retained C image to verify that it rejects schema `0011`
+and starts only after downgrade to `0010`. The harness
 uses only the temporary database for migrations, fixtures and rollback, then
 removes its containers and database. On failure, it collects container stdout/stderr
 before removal, redacts known test credentials, and preserves the original test
