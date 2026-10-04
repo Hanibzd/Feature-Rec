@@ -1145,7 +1145,11 @@ In the same application release:
 4. Keep the physical legacy columns and `team_channel_routes` table untouched.
 
 Deploy C can safely migrate while deploy B serves because deploy B already writes
-valid tenant/repository IDs and installed-workspace channel settings. After C is
+valid tenant/repository IDs and installed-workspace channel settings. The exception
+is B/B2's admin `provision-tenant --replace-pairing`, which deletes and re-creates
+the workspace row; under `0010` the cascade deletes that team's channel settings.
+Pause provisioning with the older artifact before merging C, and resume only with
+C's admin command. After C is
 healthy, run a short second observation window and confirm no SQL or runtime path
 references the legacy fields/table.
 
@@ -2618,6 +2622,12 @@ repository standards. All issues below are resolved in the integration change:
 - **Runbook consistency (resolved).** The runbook states C's full release gate and
   second observation window, and that the newest artifact may run every older down
   step. Migration errors name their row counts and the readiness command.
+- **B2 provisioning during C's migration (resolved procedurally).** B2's
+  `provision-tenant --replace-pairing` deletes and re-creates the workspace row; at
+  `0010` the cascade erases that team's channel settings, including approver
+  restrictions, while `0009` preserves them (reproduced). B2 is shipped and the
+  cascade is an accepted schema decision, so the runbook pauses B2-artifact
+  provisioning before merging C; C's own provisioning re-pairs the row in place.
 - **Open (release gates, not code).** B2 hosted two-workspace verification, the first
   observation window, a clean readiness report and a fresh backup remain required
   before merging C.

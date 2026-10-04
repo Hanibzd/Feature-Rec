@@ -498,9 +498,15 @@ once C has served traffic, except by restoring the pre-cutover backup.
 
 Merge (and therefore deploy) C only after B2's live installation in two real workspaces passes the
 two-tenant smoke, the first observation window is clean, `validate-contract-readiness` reports no
-issues, and a fresh backup exists. C can migrate while B2 still serves because B2 already writes
-complete cycle identity and installed-workspace settings. After C is healthy, run a short second
-observation window confirming no SQL or runtime path uses the legacy fields or table before deploy D.
+issues, and a fresh backup exists. B2's serving instances can keep running while C migrates because
+B2 already writes complete cycle identity and installed-workspace settings. B2's admin command is not
+safe against `0010`: `provision-tenant --replace-pairing` deletes and re-creates the workspace row,
+and the cascade then deletes that team's channel settings, reverting approver restrictions to
+unrestricted approval. Before merging C, pause provisioning with the B2 artifact, including over
+`railway ssh` into a B2 instance. Once C is the only serving version, provision with C's admin
+command, which re-pairs the row in place. A C-to-B2 rollback drops the cascade before B2 starts, so
+B2 provisioning is safe again afterwards. After C is healthy, run a short second observation window
+confirming no SQL or runtime path uses the legacy fields or table before deploy D.
 
 The image includes the compiled `node dist/admin.js` control plane; it does not depend on `tsx` or
 development dependencies. Production commands require an explicit `--environment` label, and every
