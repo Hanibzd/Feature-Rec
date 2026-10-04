@@ -93,11 +93,19 @@ OAuth Redirect URL: https://<host>/api/slack/oauth/callback
 - If the public origin changes, update all four URLs together with `FEATURE_REC_BASE_URL`; see
   [Railway deployment](#railway-deployment).
 
-Adding a scope is a coordinated change. Add it to the app first. Each workspace receives it only
-when it reinstalls: the customer opens the hosted start URL again and the operator provisions the
-new installation, as for a [token replacement](tenant-onboarding.md#change-or-remove-a-tenant).
-Deploy the service that uses the new scope after the workspaces have reinstalled; a workspace that
-has not reinstalled gets `missing_scope`, which surfaces through the check-run error path.
+The hosted installer requests exactly the scopes in `SLACK_OAUTH_SCOPES`
+([`slack-oauth.ts`](../packages/service/src/slack-oauth.ts)) and rejects an installation that lacks
+any of them, so a scope added only in the Slack app settings is never requested. Adding a scope is a
+coordinated change:
+
+1. Add the scope to the Slack app's bot scopes.
+2. Deploy a release that adds it to `SLACK_OAUTH_SCOPES` without using it at runtime yet. From then
+   on, every installation must grant it.
+3. Have each workspace reinstall: the customer opens the hosted start URL again and the operator
+   provisions the new installation, as for a
+   [token replacement](tenant-onboarding.md#change-or-remove-a-tenant).
+4. Deploy the release that uses the scope. A workspace that has not reinstalled gets
+   `missing_scope`, which surfaces through the check-run error path.
 
 ### Hosted Slack OAuth configuration
 

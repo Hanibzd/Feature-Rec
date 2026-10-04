@@ -85,7 +85,8 @@ frontend-visible change worth validating. It sends the PR title, the changed fil
 - Frontend-visible: UI, UX, copy, layout, styling, route, visual-state and frontend user-flow
   changes.
 
-The classifier also names the files that carry the visible change; the renderer prefers those.
+The classifier also names the files that carry the visible change; the renderer prefers those
+within the limits described in [Demo videos](#demo-videos).
 
 Without `ANTHROPIC_API_KEY`, a filename heuristic runs instead. Frontend candidates are `.tsx`,
 `.jsx`, `.css` and `.scss` files, plus `.ts` and `.js` files inside a directory named `app`,
@@ -98,10 +99,14 @@ review must provide it. The workflow settings are listed in
 
 ## Demo videos
 
-The renderer takes up to three changed `.tsx` or `.jsx` frontend candidates that still exist at the
-head commit, preferring the files the classifier named. If none can be extracted, the run fails
+The renderer considers only the first three changed `.tsx` or `.jsx` files in path order, skipping
+test, spec and story files. Files the PR deletes are dropped after that cut, and the classifier's
+named files are preferred only among those three; when it names none of them, all are used. Later
+files are never rendered, even when the classifier names them. If nothing remains, the run fails
 with `Classifier found a frontend-visible change, but Feature-Rec could not extract reproducible
-TSX/JSX source.` Changes that touch only stylesheets or plain modules therefore cannot be rendered.
+TSX/JSX source.` That happens, for example, when the first three such files are all deleted, even if
+a later one survives. Changes that touch only stylesheets or plain modules cannot be rendered
+either.
 
 For each source, a Claude-based replication agent turns the before and after source into a
 self-contained Remotion scene, styled with the repository's Tailwind configuration and global CSS
@@ -309,8 +314,8 @@ Runner requests answer with:
   Sharing a workspace or account between tenants is not supported.
 - Only GitHub.com Actions OIDC for `pull_request` workflows. A custom issuer is a configuration
   seam, not GitHub Enterprise Server support.
-- Rendering covers `.tsx` and `.jsx` sources only, at most three per PR, and needs
-  `ANTHROPIC_API_KEY`.
+- Rendering covers only the first three changed `.tsx` or `.jsx` files in path order and needs
+  `ANTHROPIC_API_KEY`; see [Demo videos](#demo-videos).
 - Slack Enterprise Grid organization installs and Slack token rotation are not supported.
 - No GitHub webhooks: installation and repository changes take effect at the next authorization.
 - No self-serve signup or onboarding UI; onboarding is operator-assisted, and workflows are added
