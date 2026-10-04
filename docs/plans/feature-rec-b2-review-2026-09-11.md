@@ -33,7 +33,7 @@ C/D implementation and hosted environment state are outside this checkout review
    could not create sessions. Updated configuration requirements, implementation
    markers, unusable-token recovery and rollback. The rollback procedure now
    identifies unconsumed rows, invokes compiled cancellation and requires an empty
-   result before downgrade. See [the runbook](../setup-and-operations.md)
+   result before downgrade. See [the runbook](../operations.md#rollback-runbooks)
    and [.env.example](../../.env.example).
 3. **P3, confidence 10/10: staging comment overstated key-guard work.**
    “Check every stored token before writing this one” was inaccurate when a verifier

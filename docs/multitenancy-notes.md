@@ -1,37 +1,13 @@
 # Multitenancy Notes
 
-## Current contract after deploy D
+## Current behavior
 
 The singleton designs below are historical and are superseded by the
-[OIDC and multitenancy plan](plans/feature-rec-oidc-multitenancy-plan.md).
-Tenants are UUID product boundaries, each with one GitHub account/installation and one Slack workspace.
-All runner calls verify GitHub OIDC, resolve the enabled tenant, and mint a live repository-scoped
-installation token. Cycles, locks, supersession, and guarded transitions use tenant/repository IDs.
-Repository names are transient GitHub coordinates only: deploy C stopped every legacy read/write, and
-deploy D's `0011_multitenant_contract` dropped `team_channel_routes` and the `review_cycles`
-`owner`, `repo`, `config_hash` and `config_json` columns.
-
-Every Slack Web API operation uses the token decrypted from the selected workspace row. Signed
-workspace IDs have no global fallback, and approval payloads must match the cycle tenant's workspace.
-The persisted bot user ID is refreshed by provisioning `auth.test`; normal membership events compare
-it before decrypting or calling Slack. `slack_workspaces.selected_channel_id` owns routing. Lifecycle
-deletion explicitly removes team settings and disables the tenant; since `0010_multitenant_enforce`,
-the `channel_settings_team_id_fkey` `ON DELETE CASCADE` also backstops that cleanup at the database.
-
-The release boundaries remain separate: A expands, B cuts over, B2 adds Slack OAuth installation,
-C enforces/stops legacy writes, and D contracts. The
-[migration and rollback runbook](setup-and-operations.md#backup-rollback-and-migration) owns the
-migration sequence, release gates and rollback procedures.
-
-B2 provides hosted Slack OAuth routes, SDK configuration and
-[persistent OAuth storage](setup-and-operations.md#persistent-installation-storage). Session secrets
-are hashed, callback claims are single-use across processes, and verified pending bot tokens are
-encrypted separately from active workspace credentials. Pending installations cannot authorize
-runtime work or replace an active token. Consumption requires a transaction with enabled matching
-integrations and the exact validated active/pending ciphertext, records the result identifiers and clears the pending
-ciphertext. Operator commands provision by pending installation ID, inspect sanitized
-status, and cancel abandoned records. Manual token input remains supported. Pending
-records have no local expiry; OAuth sessions expire after ten minutes.
+[OIDC and multitenancy plan](plans/feature-rec-oidc-multitenancy-plan.md). The current tenant model,
+identity chain and Slack/GitHub isolation are described in
+[How Feature-Rec works](product.md#tenants-and-isolation). Hosted Slack installation storage,
+lifecycle-event handling, the release history, migrations and rollback are described in
+[Operations](operations.md).
 
 ## Historical singleton notes
 

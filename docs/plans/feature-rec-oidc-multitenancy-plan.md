@@ -2151,7 +2151,7 @@ consumption, cancellation and bounded cleanup. Session lifetime is ten minutes;
 pending installations have no local expiry (scope updated on 2026-09-10). Terminal records are retained for 24 hours after
 expiry/cancellation or consumption. These are storage primitives; public routes,
 their cleanup scheduling and pending-installation operator commands remain later
-milestones. See the [storage and rollback runbook](../setup-and-operations.md#persistent-installation-storage).
+milestones. See the [storage and rollback runbook](../operations.md#persistent-installation-storage).
 
 The gstack code review found and resolved the following issues before completion:
 

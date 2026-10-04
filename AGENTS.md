@@ -6,8 +6,11 @@ documentation instead of duplicating it.
 
 ## Before editing
 
-- Read [README.md](README.md) for project structure, setup, and commands, and
-  [docs/setup-and-operations.md](docs/setup-and-operations.md) for product behavior and operations.
+- Read [README.md](README.md) for project structure, setup, and commands,
+  [docs/product.md](docs/product.md) for product behavior, and
+  [docs/operations.md](docs/operations.md) and
+  [docs/tenant-onboarding.md](docs/tenant-onboarding.md) for operations and
+  tenant onboarding.
 - Inspect the relevant implementation and selftests before changing behavior.
   Plans under `docs/plans/` include historical and superseded designs; check their
   status against current code rather than assuming every proposed step has shipped.
@@ -40,8 +43,8 @@ documentation instead of duplicating it.
   Review output changes from local test runs and avoid concurrent tests that
   write to the same paths.
 - Before migration or compatibility changes, consult the relevant rollout plan
-  and [operational runbook](docs/setup-and-operations.md). Do not remove transitional code
-  merely because it appears redundant.
+  and [operational runbook](docs/operations.md#backup-rollback-and-migration).
+  Do not remove transitional code merely because it appears redundant.
 - Extend the relevant existing selftest for meaningful behavior changes. Test
   observable outcomes and failure cases using the existing assertion style and
   provider fakes; avoid tests that only mirror implementation details.

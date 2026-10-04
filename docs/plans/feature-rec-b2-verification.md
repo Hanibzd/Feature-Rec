@@ -57,7 +57,7 @@ prove hosted routing. The local environment lacks OAuth app credentials, a hoste
 base URL and encryption-key configuration; no real two-workspace target inventory
 was supplied during this implementation. Hosted configuration was not inspected.
 
-Complete the [runbook](../setup-and-operations.md#hosted-slack-oauth-installation-b2)
+Complete the [runbook](../operations.md#hosted-slack-oauth-configuration)
 and [live smoke matrix](feature-rec-oidc-multitenancy-plan.md#end-to-end-beta-smoke-matrix) with the
 actual targets, retain a backup, and record observation plus a clean contract
 readiness report before allowing C. Keep C's separate work and migration renumbering
