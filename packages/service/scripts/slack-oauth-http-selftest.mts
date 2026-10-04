@@ -636,7 +636,6 @@ try {
       const identity = await new SlackClient(token).botIdentity();
       return { teamId: identity.teamId, botUserId: identity.userId, channelIds: [pairing.channelId] };
     },
-    resolveRepository: async () => { throw new Error("Provisioning must inspect the specified installation"); },
     inspectInstallationRepository: async (installationId, owner, repo) => {
       const pairing = pairings.find((candidate) => candidate.installationId === installationId);
       assert.ok(pairing);

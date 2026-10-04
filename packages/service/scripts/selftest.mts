@@ -74,10 +74,13 @@ function repositoryIdFor(owner: string, repo: string): string {
   return String(parseInt(crypto.createHash("sha256").update(`${owner}/${repo}`).digest("hex").slice(0, 8), 16));
 }
 const DEFAULT_REPOSITORY_ID = repositoryIdFor("MathFreedom", "Agora");
+// StartCycleInput carries no repository names; the fixture keeps them to feed
+// the GitHub stub's RepositoryAccess coordinates.
+type StartFixture = Omit<StartCycleInput, "cycleKey"> & { owner: string; repo: string };
 const repositories = new Map<string, { owner: string; repo: string }>([
   [DEFAULT_REPOSITORY_ID, { owner: "MathFreedom", repo: "Agora" }],
 ]);
-const requestedPullRequest = new AsyncLocalStorage<Omit<StartCycleInput, "cycleKey">>();
+const requestedPullRequest = new AsyncLocalStorage<StartFixture>();
 const appFixtures = new Map<AppInstance, { teamId: string }>();
 
 async function seedWorkspace(teamId: string): Promise<void> {
@@ -256,7 +259,7 @@ function makeSlackStub(options: { teamId?: string; channels?: string[] } = {}) {
   return stub;
 }
 
-function makeStart(prNumber: number, overrides: Partial<Omit<StartCycleInput, "cycleKey">> = {}): Omit<StartCycleInput, "cycleKey"> {
+function makeStart(prNumber: number, overrides: Partial<StartFixture> = {}): StartFixture {
   const start = {
     tenantId: fixtureIdentity("T0123").tenantId,
     repositoryId: DEFAULT_REPOSITORY_ID,
@@ -272,7 +275,7 @@ function makeStart(prNumber: number, overrides: Partial<Omit<StartCycleInput, "c
   return start;
 }
 
-async function startRun(app: AppInstance, start: Omit<StartCycleInput, "cycleKey">) {
+async function startRun(app: AppInstance, start: StartFixture) {
   const fixture = appFixtures.get(app)!;
   repositories.set(start.repositoryId, { owner: start.owner, repo: start.repo });
   const res = await requestedPullRequest.run(start, async () => await app.inject({
@@ -518,7 +521,7 @@ try {
     );
   }
 
-  // --- Migration 0005–0008: routes, mention modes, multitenant expand ---
+  // --- Migration 0005–0010: routes, mention modes, expand, OAuth storage, enforce ---
   {
     const migrationDbName = `${dbName}_migration`;
     const migrationAdmin = new Client({ connectionString: adminUrl });
@@ -569,9 +572,13 @@ try {
           .execute(migrationDb)
           .then((result) => result.rows[0]?.relation ?? null);
 
-      const latest = await migrator.migrateToLatest();
-      if (latest.error) throw latest.error;
-      const routes = await migrationDb.selectFrom("team_channel_routes").selectAll().execute();
+      const expand = await migrator.migrateTo("0008_multitenant_expand");
+      if (expand.error) throw expand.error;
+      const readRoutes = async () =>
+        sql<{ team_id: string; selected_channel_id: string }>`
+          select team_id, selected_channel_id from team_channel_routes order by team_id
+        `.execute(migrationDb).then((result) => result.rows);
+      const routes = await readRoutes();
       assert.deepEqual(routes, [
         { team_id: "TBACKFILL", selected_channel_id: "COLDEST" },
       ]);
@@ -726,8 +733,143 @@ try {
       );
       await constraintClient.end();
 
-      const downOAuth = await migrator.migrateTo("0008_multitenant_expand");
+      // B2's additive 0009 precedes enforcement. A pending installation staged
+      // there must survive a C-to-B2 rollback.
+      const oauth = await migrator.migrateTo("0009_slack_oauth_installations");
+      if (oauth.error) throw oauth.error;
+      await sql`
+        insert into slack_oauth_installations
+          (id, status, claimed_at, team_id, bot_user_id, bot_token_ciphertext)
+        values
+          ('00000000-0000-4000-b000-000000000001', 'pending', now(), 'TPENDING', 'UBOT', 'ciphertext-pending')
+      `.execute(migrationDb);
+      const pendingInstallations = () => sql<{ id: string; status: string }>`
+        select id::text as id, status from slack_oauth_installations order by id
+      `.execute(migrationDb).then((result) => result.rows);
+
+      // 0010 refuses while any review cycle lacks authenticated identity…
+      await sql`
+        insert into review_cycles
+          (id, cycle_key, owner, repo, pr_number, pr_author, pr_title, head_sha,
+           status, attempt_id, created_at, updated_at)
+        values
+          ('enforce-blocker', 'legacy/key#9:abcdefg', 'legacy', 'key', 9, '', '',
+           'abcdefg', 'failed', 'attempt', '2026-01-01', '2026-01-01')
+      `.execute(migrationDb);
+      const blockedByNullCycle = await migrator.migrateTo("0010_multitenant_enforce");
+      assert.ok(blockedByNullCycle.error);
+      assert.match(String(blockedByNullCycle.error), /0010_multitenant_enforce: review_cycles rows lack tenant\/repository identity \(1\); run validate-contract-readiness/);
+      await sql`delete from review_cycles where id = 'enforce-blocker'`.execute(migrationDb);
+
+      // …and while channel settings refer to an absent Slack workspace.
+      const blockedByOrphans = await migrator.migrateTo("0010_multitenant_enforce");
+      assert.ok(blockedByOrphans.error);
+      assert.match(String(blockedByOrphans.error), /0010_multitenant_enforce: channel_settings rows refer to an absent Slack workspace \(5\); run validate-contract-readiness/);
+
+      const seedWorkspaces = () => sql`
+        insert into tenants (id, enabled) values
+          ('00000000-0000-4000-a000-000000000001', true),
+          ('00000000-0000-4000-a000-000000000002', true),
+          ('00000000-0000-4000-a000-000000000003', true)
+        on conflict (id) do nothing;
+        insert into slack_workspaces (team_id, tenant_id, bot_user_id, bot_token_ciphertext) values
+          ('TBACKFILL', '00000000-0000-4000-a000-000000000001', 'UBOT', 'ciphertext-1'),
+          ('TLEFTONLY', '00000000-0000-4000-a000-000000000002', 'UBOT', 'ciphertext-2'),
+          ('TNULLMENTION', '00000000-0000-4000-a000-000000000003', 'UBOT', 'ciphertext-3')
+        on conflict (team_id) do nothing
+      `.execute(migrationDb);
+      await seedWorkspaces();
+      const latest = await migrator.migrateToLatest();
+      if (latest.error) throw latest.error;
+      const executedMigrations = () => migrator.getMigrations()
+        .then((rows) => rows.filter((row) => row.executedAt).map((row) => row.name));
+      assert.deepEqual((await executedMigrations()).slice(-3), [
+        "0008_multitenant_expand",
+        "0009_slack_oauth_installations",
+        "0010_multitenant_enforce",
+      ]);
+
+      const identityNullability = () => sql<{ column_name: string; is_nullable: string }>`
+        select column_name, is_nullable
+        from information_schema.columns
+        where table_name = 'review_cycles'
+          and column_name in ('owner', 'repo', 'tenant_id', 'repository_id')
+        order by column_name
+      `.execute(migrationDb).then((result) => result.rows);
+      const enforcedNullability = [
+        { column_name: "owner", is_nullable: "YES" },
+        { column_name: "repo", is_nullable: "YES" },
+        { column_name: "repository_id", is_nullable: "NO" },
+        { column_name: "tenant_id", is_nullable: "NO" },
+      ];
+      assert.deepEqual(await identityNullability(), enforcedNullability);
+      const cascadeDeleteRule = () => sql<{ delete_rule: string }>`
+        select confdeltype::text as delete_rule from pg_constraint
+        where conname = 'channel_settings_team_id_fkey'
+      `.execute(migrationDb).then((result) => result.rows[0]?.delete_rule ?? null);
+      assert.equal(await cascadeDeleteRule(), "c");
+
+      // Artifacts B2 and B refuse a database that records 0010; C-to-B2 and
+      // C-to-B must migrate down with artifact C first.
+      const olderArtifactResult = (lastMigration: string) => new Migrator({
+        db: migrationDb,
+        provider: {
+          getMigrations: async () =>
+            Object.fromEntries(Object.entries(allMigrations).filter(([name]) => name <= lastMigration)),
+        },
+      }).migrateToLatest();
+      const artifactB2Result = await olderArtifactResult("0009_slack_oauth_installations");
+      assert.ok(artifactB2Result.error);
+      assert.match(String(artifactB2Result.error), /previously executed migration 0010_multitenant_enforce is missing/i);
+      const artifactBResult = await olderArtifactResult("0008_multitenant_expand");
+      assert.ok(artifactBResult.error);
+      assert.match(String(artifactBResult.error), /previously executed migration 0009_slack_oauth_installations is missing/i);
+
+      // The FK is a cascade backstop: deleting a workspace removes its settings.
+      await sql`
+        insert into tenants (id, enabled) values ('00000000-0000-4000-a000-000000000004', true);
+        insert into slack_workspaces (team_id, tenant_id, bot_user_id, bot_token_ciphertext)
+          values ('TCASCADE', '00000000-0000-4000-a000-000000000004', 'UBOT', 'ciphertext-4');
+        insert into channel_settings (team_id, channel_id, mention_mode, mention_audience, approvers, updated_by, updated_at)
+          values ('TCASCADE', 'CCASCADE', 'approvers', null, null, 'U1', now())
+      `.execute(migrationDb);
+      await sql`delete from slack_workspaces where team_id = 'TCASCADE'`.execute(migrationDb);
+      assert.equal(
+        await sql<{ count: string }>`
+          select count(*)::text as count from channel_settings where team_id = 'TCASCADE'
+        `.execute(migrationDb).then((result) => result.rows[0]?.count),
+        "0",
+      );
+
+      // C to B2 reverts only 0010: constraints drop, data and B2 storage survive.
+      const downEnforce = await migrator.migrateTo("0009_slack_oauth_installations");
+      if (downEnforce.error) throw downEnforce.error;
+      assert.equal((await executedMigrations()).at(-1), "0009_slack_oauth_installations");
+      assert.equal(await cascadeDeleteRule(), null);
+      assert.deepEqual(await identityNullability(), [
+        { column_name: "owner", is_nullable: "YES" },
+        { column_name: "repo", is_nullable: "YES" },
+        { column_name: "repository_id", is_nullable: "YES" },
+        { column_name: "tenant_id", is_nullable: "YES" },
+      ]);
+      assert.deepEqual(await pendingInstallations(), [
+        { id: "00000000-0000-4000-b000-000000000001", status: "pending" },
+      ]);
+
+      // B2 to B requires cancelling pending installations before 0009.down().
+      await sql`
+        update slack_oauth_installations
+        set status = 'cancelled', bot_token_ciphertext = null, expires_at = now()
+        where status = 'pending'
+      `.execute(migrationDb);
+      const downOAuth = await migrator.migrateDown();
       if (downOAuth.error) throw downOAuth.error;
+      assert.equal(
+        await sql<{ relation: string | null }>`select to_regclass('public.slack_oauth_installations')::text as relation`
+          .execute(migrationDb)
+          .then((result) => result.rows[0]?.relation ?? null),
+        null,
+      );
 
       // 0008.down() refuses to make legacy names non-null when a newer row
       // cannot be represented by the compatibility runtime.
@@ -744,7 +886,7 @@ try {
       assert.match(String(blockedExpandDown.error), /owner\/repo contain null values/);
       await sql`delete from review_cycles where id = 'down-blocker'`.execute(migrationDb);
 
-      // One successful down from latest removes only the additive 0008 schema.
+      // The next down removes only the additive 0008 schema.
       const downExpand = await migrator.migrateDown();
       if (downExpand.error) throw downExpand.error;
       assert.equal(
@@ -801,13 +943,18 @@ try {
         "0",
       );
 
+      // Forward again: 0008.down dropped the integration tables, so the re-up
+      // must reseed workspaces at the 0008 waypoint before 0010 can enforce.
+      const cleanupExpand = await migrator.migrateTo("0008_multitenant_expand");
+      if (cleanupExpand.error) throw cleanupExpand.error;
+      await seedWorkspaces();
       const cleanupAgain = await migrator.migrateToLatest();
       if (cleanupAgain.error) throw cleanupAgain.error;
+      assert.equal((await executedMigrations()).at(-1), "0010_multitenant_enforce");
+      assert.deepEqual(await identityNullability(), enforcedNullability);
+      assert.equal(await cascadeDeleteRule(), "c");
       assert.equal(await legacyTableName(), null);
-      assert.deepEqual(
-        await migrationDb.selectFrom("team_channel_routes").selectAll().execute(),
-        routes,
-      );
+      assert.deepEqual(await readRoutes(), routes);
       assert.deepEqual(
         await migrationDb
           .selectFrom("channel_settings")
@@ -1460,11 +1607,14 @@ try {
       true,
     );
     assert.equal((await resolveChannel(store, slackClient, "TROUTE")).channelId, "CB");
-    // A later join must not replace the effective workspace selection with a stale legacy route.
-    await routeClient.query("update team_channel_routes set selected_channel_id = 'CA' where team_id = 'TROUTE'");
+    // A later join must not replace the effective workspace selection with a
+    // stale legacy route; the frozen legacy table is never read or written.
+    await routeClient.query(
+      "insert into team_channel_routes (team_id, selected_channel_id) values ('TROUTE', 'CA') on conflict (team_id) do update set selected_channel_id = 'CA'",
+    );
     assert.equal((await store.initializeTeamChannelRoute({ teamId: "TROUTE", channelId: "CA" })).initializedRoute, false);
     assert.equal(await store.getSelectedChannelId("TROUTE"), "CB");
-    assert.equal((await routeClient.query("select selected_channel_id from team_channel_routes where team_id = 'TROUTE'")).rows[0].selected_channel_id, "CB");
+    assert.equal((await routeClient.query("select selected_channel_id from team_channel_routes where team_id = 'TROUTE'")).rows[0].selected_channel_id, "CA");
     assert.deepEqual(await store.getChannelSettings("TROUTE", "CB"), {
       mention: { mode: "custom", audience: "<!here>" },
       approvers: ["U2"],
