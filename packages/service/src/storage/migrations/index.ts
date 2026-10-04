@@ -9,6 +9,7 @@ import * as mentionModes from "./0007_mention_modes";
 import * as multitenantExpand from "./0008_multitenant_expand";
 import * as slackOAuthInstallations from "./0009_slack_oauth_installations";
 import * as multitenantEnforce from "./0010_multitenant_enforce";
+import * as multitenantContract from "./0011_multitenant_contract";
 
 // Static import map (not FileMigrationProvider) so migrations resolve under
 // tsx and any future bundling without filesystem lookups.
@@ -23,6 +24,7 @@ const migrations: Record<string, Migration> = {
   "0008_multitenant_expand": multitenantExpand,
   "0009_slack_oauth_installations": slackOAuthInstallations,
   "0010_multitenant_enforce": multitenantEnforce,
+  "0011_multitenant_contract": multitenantContract,
 };
 
 export const migrationProvider: MigrationProvider = {

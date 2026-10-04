@@ -521,7 +521,7 @@ try {
     );
   }
 
-  // --- Migration 0005–0010: routes, mention modes, expand, OAuth storage, enforce ---
+  // --- Migration 0005–0011: routes, mention modes, expand, OAuth storage, enforce, contract ---
   {
     const migrationDbName = `${dbName}_migration`;
     const migrationAdmin = new Client({ connectionString: adminUrl });
@@ -565,12 +565,9 @@ try {
       `);
       await seed.end();
 
-      const legacyTableName = async (): Promise<string | null> =>
-        sql<{ relation: string | null }>`
-          select to_regclass('public.bot_channels')::text as relation
-        `
-          .execute(migrationDb)
-          .then((result) => result.rows[0]?.relation ?? null);
+      const relationName = (name: string) => sql<{ relation: string | null }>`
+        select to_regclass(${`public.${name}`})::text as relation
+      `.execute(migrationDb).then((result) => result.rows[0]?.relation ?? null);
 
       const expand = await migrator.migrateTo("0008_multitenant_expand");
       if (expand.error) throw expand.error;
@@ -625,7 +622,7 @@ try {
           approvers: '["U5"]',
         },
       ]);
-      assert.equal(await legacyTableName(), null);
+      assert.equal(await relationName("bot_channels"), null);
 
       const expandedTables = await sql<{ table_name: string }>`
         select table_name
@@ -746,6 +743,21 @@ try {
       const pendingInstallations = () => sql<{ id: string; status: string }>`
         select id::text as id, status from slack_oauth_installations order by id
       `.execute(migrationDb).then((result) => result.rows);
+      const executedMigrations = () => migrator.getMigrations()
+        .then((rows) => rows.filter((row) => row.executedAt).map((row) => row.name));
+      const legacyColumns = () => sql<{ column_name: string; is_nullable: string; data_type: string }>`
+        select column_name, is_nullable, data_type
+        from information_schema.columns
+        where table_name = 'review_cycles'
+          and column_name in ('owner', 'repo', 'config_hash', 'config_json')
+        order by column_name
+      `.execute(migrationDb).then((result) => result.rows);
+      const uncontractedColumns = [
+        { column_name: "config_hash", is_nullable: "YES", data_type: "text" },
+        { column_name: "config_json", is_nullable: "YES", data_type: "text" },
+        { column_name: "owner", is_nullable: "YES", data_type: "text" },
+        { column_name: "repo", is_nullable: "YES", data_type: "text" },
+      ];
 
       // 0010 refuses while any review cycle lacks authenticated identity…
       await sql`
@@ -756,9 +768,14 @@ try {
           ('enforce-blocker', 'legacy/key#9:abcdefg', 'legacy', 'key', 9, '', '',
            'abcdefg', 'failed', 'attempt', '2026-01-01', '2026-01-01')
       `.execute(migrationDb);
-      const blockedByNullCycle = await migrator.migrateTo("0010_multitenant_enforce");
+      // Deploy D's startup applies every pending migration in one transaction:
+      // an unready database at 0009 gets neither enforcement nor the contract.
+      const blockedByNullCycle = await migrator.migrateToLatest();
       assert.ok(blockedByNullCycle.error);
       assert.match(String(blockedByNullCycle.error), /0010_multitenant_enforce: review_cycles rows lack tenant\/repository identity \(1\); run validate-contract-readiness/);
+      assert.equal((await executedMigrations()).at(-1), "0009_slack_oauth_installations");
+      assert.deepEqual(await readRoutes(), routes);
+      assert.deepEqual(await legacyColumns(), uncontractedColumns);
       await sql`delete from review_cycles where id = 'enforce-blocker'`.execute(migrationDb);
 
       // …and while channel settings refer to an absent Slack workspace.
@@ -779,10 +796,8 @@ try {
         on conflict (team_id) do nothing
       `.execute(migrationDb);
       await seedWorkspaces();
-      const latest = await migrator.migrateToLatest();
-      if (latest.error) throw latest.error;
-      const executedMigrations = () => migrator.getMigrations()
-        .then((rows) => rows.filter((row) => row.executedAt).map((row) => row.name));
+      const enforce = await migrator.migrateTo("0010_multitenant_enforce");
+      if (enforce.error) throw enforce.error;
       assert.deepEqual((await executedMigrations()).slice(-3), [
         "0008_multitenant_expand",
         "0009_slack_oauth_installations",
@@ -841,7 +856,77 @@ try {
         "0",
       );
 
-      // C to B2 reverts only 0010: constraints drop, data and B2 storage survive.
+      // D contract. A pre-cutover cycle kept its repository names and config
+      // payload beside its backfilled identity; the contract drops them.
+      const contractedNullability = [
+        { column_name: "repository_id", is_nullable: "NO" },
+        { column_name: "tenant_id", is_nullable: "NO" },
+      ];
+      await sql`
+        insert into review_cycles
+          (id, cycle_key, tenant_id, repository_id, owner, repo, config_json, config_hash,
+           pr_number, pr_author, pr_title, head_sha, status, attempt_id, created_at, updated_at)
+        values
+          ('contract-history', '00000000-0000-4000-a000-000000000001/101#3:abcdefg',
+           '00000000-0000-4000-a000-000000000001', 101, 'Legacy', 'Repo', '{"version":1}', 'cafe',
+           3, 'author', 'title', 'abcdefg', 'accepted', 'attempt', '2026-01-01', '2026-01-01')
+      `.execute(migrationDb);
+      const contract = await migrator.migrateToLatest();
+      if (contract.error) throw contract.error;
+      assert.equal((await executedMigrations()).at(-1), "0011_multitenant_contract");
+      assert.equal(await relationName("team_channel_routes"), null);
+      assert.deepEqual(await legacyColumns(), []);
+      assert.deepEqual(await identityNullability(), contractedNullability);
+      assert.equal(await cascadeDeleteRule(), "c");
+      const historyIdentity = () => sql<{ id: string; tenant_id: string; repository_id: string; cycle_key: string }>`
+        select id, tenant_id::text as tenant_id, repository_id::text as repository_id, cycle_key
+        from review_cycles where id = 'contract-history'
+      `.execute(migrationDb).then((result) => result.rows);
+      const contractedHistory = [{
+        id: "contract-history",
+        tenant_id: "00000000-0000-4000-a000-000000000001",
+        repository_id: "101",
+        cycle_key: "00000000-0000-4000-a000-000000000001/101#3:abcdefg",
+      }];
+      assert.deepEqual(await historyIdentity(), contractedHistory);
+
+      // Artifact C refuses a database that records 0011; D-to-C must migrate
+      // down with artifact D first.
+      const artifactCResult = await olderArtifactResult("0010_multitenant_enforce");
+      assert.ok(artifactCResult.error);
+      assert.match(String(artifactCResult.error), /previously executed migration 0011_multitenant_contract is missing/i);
+
+      // D to C recreates only empty compatibility schema; deploy C neither reads
+      // nor writes it, so no historical value is fabricated.
+      const downContract = await migrator.migrateTo("0010_multitenant_enforce");
+      if (downContract.error) throw downContract.error;
+      assert.equal((await executedMigrations()).at(-1), "0010_multitenant_enforce");
+      assert.equal(await relationName("team_channel_routes"), "team_channel_routes");
+      assert.deepEqual(await readRoutes(), []);
+      assert.deepEqual(await legacyColumns(), uncontractedColumns);
+      assert.deepEqual(await identityNullability(), enforcedNullability);
+      assert.equal(await cascadeDeleteRule(), "c");
+      assert.deepEqual(
+        await sql`
+          select owner, repo, config_json, config_hash from review_cycles where id = 'contract-history'
+        `.execute(migrationDb).then((result) => result.rows),
+        [{ owner: null, repo: null, config_json: null, config_hash: null }],
+      );
+      // Artifact C now finds every recorded migration and has none pending.
+      const artifactCAfterDown = await olderArtifactResult("0010_multitenant_enforce");
+      if (artifactCAfterDown.error) throw artifactCAfterDown.error;
+      assert.deepEqual(artifactCAfterDown.results, []);
+
+      // Forward again: the recreated compatibility schema contracts cleanly.
+      const contractAgain = await migrator.migrateToLatest();
+      if (contractAgain.error) throw contractAgain.error;
+      assert.equal((await executedMigrations()).at(-1), "0011_multitenant_contract");
+      assert.equal(await relationName("team_channel_routes"), null);
+      assert.deepEqual(await legacyColumns(), []);
+      assert.deepEqual(await historyIdentity(), contractedHistory);
+
+      // D's artifact reaches B2 through C: 0011 then 0010 revert, constraints
+      // drop, and data and B2 storage survive.
       const downEnforce = await migrator.migrateTo("0009_slack_oauth_installations");
       if (downEnforce.error) throw downEnforce.error;
       assert.equal((await executedMigrations()).at(-1), "0009_slack_oauth_installations");
@@ -864,42 +949,25 @@ try {
       `.execute(migrationDb);
       const downOAuth = await migrator.migrateDown();
       if (downOAuth.error) throw downOAuth.error;
-      assert.equal(
-        await sql<{ relation: string | null }>`select to_regclass('public.slack_oauth_installations')::text as relation`
-          .execute(migrationDb)
-          .then((result) => result.rows[0]?.relation ?? null),
-        null,
-      );
+      assert.equal(await relationName("slack_oauth_installations"), null);
 
-      // 0008.down() refuses to make legacy names non-null when a newer row
-      // cannot be represented by the compatibility runtime.
-      await sql`
-        insert into review_cycles
-          (id, cycle_key, owner, repo, pr_number, pr_author, pr_title, head_sha,
-           status, attempt_id, created_at, updated_at)
-        values
-          ('down-blocker', 'future/key#1:abcdefg', null, null, 1, '', '',
-           'abcdefg', 'failed', 'attempt', '2026-01-01', '2026-01-01')
-      `.execute(migrationDb);
+      // The contract deleted the pre-cutover cycle's repository names, so the
+      // compatibility runtime of deploy A cannot represent it: 0008.down()
+      // refuses to make legacy names non-null.
       const blockedExpandDown = await migrator.migrateDown();
       assert.ok(blockedExpandDown.error);
       assert.match(String(blockedExpandDown.error), /owner\/repo contain null values/);
-      await sql`delete from review_cycles where id = 'down-blocker'`.execute(migrationDb);
+      await sql`delete from review_cycles where id = 'contract-history'`.execute(migrationDb);
 
       // The next down removes only the additive 0008 schema.
       const downExpand = await migrator.migrateDown();
       if (downExpand.error) throw downExpand.error;
-      assert.equal(
-        await sql<{ relation: string | null }>`select to_regclass('public.tenants')::text as relation`
-          .execute(migrationDb)
-          .then((result) => result.rows[0]?.relation ?? null),
-        null,
-      );
+      assert.equal(await relationName("tenants"), null);
 
       // The next down reverts 0007 (schema only), not 0006.
       const downMention = await migrator.migrateDown();
       if (downMention.error) throw downMention.error;
-      assert.equal(await legacyTableName(), null);
+      assert.equal(await relationName("bot_channels"), null);
       // Intermediate shape is pre-0007 (`mention`, no `mention_mode`), so query raw.
       const postDownMention = await sql<{
         team_id: string;
@@ -935,7 +1003,7 @@ try {
       // The next down recreates only the empty legacy bot_channels shape.
       const downLegacy = await migrator.migrateDown();
       if (downLegacy.error) throw downLegacy.error;
-      assert.equal(await legacyTableName(), "bot_channels");
+      assert.equal(await relationName("bot_channels"), "bot_channels");
       assert.equal(
         await sql<{ count: string }>`select count(*)::text as count from bot_channels`
           .execute(migrationDb)
@@ -950,11 +1018,12 @@ try {
       await seedWorkspaces();
       const cleanupAgain = await migrator.migrateToLatest();
       if (cleanupAgain.error) throw cleanupAgain.error;
-      assert.equal((await executedMigrations()).at(-1), "0010_multitenant_enforce");
-      assert.deepEqual(await identityNullability(), enforcedNullability);
+      assert.equal((await executedMigrations()).at(-1), "0011_multitenant_contract");
+      assert.deepEqual(await identityNullability(), contractedNullability);
+      assert.deepEqual(await legacyColumns(), []);
       assert.equal(await cascadeDeleteRule(), "c");
-      assert.equal(await legacyTableName(), null);
-      assert.deepEqual(await readRoutes(), routes);
+      assert.equal(await relationName("bot_channels"), null);
+      assert.equal(await relationName("team_channel_routes"), null);
       assert.deepEqual(
         await migrationDb
           .selectFrom("channel_settings")
@@ -1607,14 +1676,9 @@ try {
       true,
     );
     assert.equal((await resolveChannel(store, slackClient, "TROUTE")).channelId, "CB");
-    // A later join must not replace the effective workspace selection with a
-    // stale legacy route; the frozen legacy table is never read or written.
-    await routeClient.query(
-      "insert into team_channel_routes (team_id, selected_channel_id) values ('TROUTE', 'CA') on conflict (team_id) do update set selected_channel_id = 'CA'",
-    );
+    // A later join must not replace the effective workspace selection.
     assert.equal((await store.initializeTeamChannelRoute({ teamId: "TROUTE", channelId: "CA" })).initializedRoute, false);
     assert.equal(await store.getSelectedChannelId("TROUTE"), "CB");
-    assert.equal((await routeClient.query("select selected_channel_id from team_channel_routes where team_id = 'TROUTE'")).rows[0].selected_channel_id, "CA");
     assert.deepEqual(await store.getChannelSettings("TROUTE", "CB"), {
       mention: { mode: "custom", audience: "<!here>" },
       approvers: ["U2"],
@@ -1638,7 +1702,7 @@ try {
     });
 
     // The workspace remains authoritative even when its selection is null;
-    // rollback route dual writes never become runtime fallback reads.
+    // no other route source exists to fall back to.
     await routeClient.query(
       "update slack_workspaces set selected_channel_id = 'CA' where team_id = 'TROUTE'",
     );

@@ -1,9 +1,8 @@
 import type { ColumnType, Generated } from "kysely";
 import type { ReviewCycleStatus } from "@feature-rec/core";
 
-// Legacy columns (owner, repo, config_json, config_hash) physically remain
-// until the 0011 contract migration but are absent here so no code path can
-// read or write them.
+// 0011_multitenant_contract dropped the legacy owner, repo, config_json and
+// config_hash columns; its down() recreates them empty for deploy C only.
 export interface ReviewCyclesTable {
   id: string;
   cycle_key: string;

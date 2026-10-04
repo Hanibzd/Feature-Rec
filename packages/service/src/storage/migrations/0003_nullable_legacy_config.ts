@@ -2,8 +2,8 @@ import type { Kysely } from "kysely";
 import { sql } from "kysely";
 
 // The config system is gone: new cycles no longer carry a config payload or
-// hash. The columns stay (nullable) so a rollback still finds them; drop them
-// in a later migration once the config-less deploy has settled.
+// hash. The columns stay (nullable) so a rollback still finds them;
+// 0011_multitenant_contract drops them.
 export async function up(db: Kysely<unknown>): Promise<void> {
   await db.schema
     .alterTable("review_cycles")

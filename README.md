@@ -10,8 +10,10 @@ The renderer recreates changed UI source as Remotion components and produces a
 deterministic, silent MP4 without launching the target application. It also runs
 locally on bundled fixtures or git diffs.
 
-For GitHub/Slack installation, channel configuration, tenant provisioning, hosting,
-and rollback procedures, see [Setup and operations](docs/setup-and-operations.md).
+[How Feature-Rec works](docs/product.md) is the canonical description of the review flow,
+Slack commands and tenant isolation. [Onboarding a tenant](docs/tenant-onboarding.md)
+brings a customer onto the hosted service, and [Operations](docs/operations.md) covers the
+GitHub and Slack apps, running and deploying the backend, administration, and rollback.
 
 ## Repository structure
 
@@ -54,9 +56,9 @@ pnpm run demo --offline --feature invite-members
 pnpm run studio
 ```
 
-To run the complete GitHub-to-Slack review flow, follow
-[repository onboarding](docs/setup-and-operations.md#onboarding-a-repository) and
-the [local backend setup](docs/setup-and-operations.md#local-demo-backend).
+To run the complete GitHub-to-Slack review flow, follow the
+[local backend setup](docs/operations.md#local-backend) and
+[onboard a test tenant](docs/tenant-onboarding.md) against it.
 
 ## Development commands
 
@@ -98,16 +100,21 @@ For an existing local/test database server, run `pnpm run selftest` with
 
 [CI](.github/workflows/ci.yaml) additionally builds the production image and checks
 compiled admin help and `/health`. Follow the
-[image build and smoke procedure](docs/setup-and-operations.md#production-image)
+[image build and smoke procedure](docs/operations.md#production-image)
 for packaging changes and the
-[integration smoke checks](docs/setup-and-operations.md#smoke-checks) for live review flows.
+[integration smoke checks](docs/operations.md#smoke-checks) for live review flows.
 
 ## Further documentation
 
-- [Setup and operations](docs/setup-and-operations.md): integration setup, Slack
-  commands, configuration, deployment, and recovery procedures.
+- [How Feature-Rec works](docs/product.md): review lifecycle, classification, Slack
+  approval, channel routing, slash commands, tenant isolation, and failure behavior.
+- [Onboarding a tenant](docs/tenant-onboarding.md): GitHub App and Slack installation,
+  provisioning, the consumer workflow, and tenant changes.
+- [Operations](docs/operations.md): the GitHub and Slack apps, runtime configuration, deployment,
+  administration commands, migrations, rollback, and smoke checks.
 - [Development agent instructions](AGENTS.md): shared working standards for coding agents.
-- [Multitenancy notes](docs/multitenancy-notes.md): current contract and historical context.
+- [Multitenancy notes](docs/multitenancy-notes.md): historical single-tenant design notes and the
+  multitenancy rollout review.
 - [Design and rollout plans](docs/plans/): implementation decisions and release sequencing;
   check each plan's status before treating it as current behavior.
 
