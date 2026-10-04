@@ -1,20 +1,32 @@
 # Operations
 
-This guide is for maintainers and operators who register the GitHub and Slack apps, run the backend
-locally or in production, administer its database, and roll back releases. Product behavior is
-described in [How Feature-Rec works](product.md), and bringing a customer onto the hosted service in
-[Onboarding a tenant](tenant-onboarding.md). For repository structure, local rendering and the
-development checks, see the [README](../README.md). Run repository commands from the repository root
-unless stated otherwise.
+This guide is for maintainers and operators who look after the existing GitHub and Slack apps, run
+the backend locally or in production, administer its database, and roll back releases. Product
+behavior is described in [How Feature-Rec works](product.md), and bringing a customer onto the
+hosted service in [Onboarding a tenant](tenant-onboarding.md). For repository structure, local
+rendering and the development checks, see the [README](../README.md). Run repository commands from
+the repository root unless stated otherwise.
 
-## Platform setup
+## Existing GitHub and Slack apps
 
-One GitHub App and one Slack app serve every tenant of a deployment. Register them once per
-deployment.
+Feature-Rec's production GitHub App and Slack app already exist, and one of each serves every
+tenant. Normal operation and [tenant onboarding](tenant-onboarding.md) never register an app:
+customers install the existing ones. The settings below are what the backend relies on; keep them,
+and change them only together with the backend. Registering an app again is needed only if one is
+lost or must be replaced, or for a separate environment; see
+[Appendix: registering the apps](#appendix-registering-the-apps). The apps are managed under
+**Developer settings → GitHub Apps** of the account that owns the GitHub App, and in the Slack app
+dashboard at `https://api.slack.com/apps`.
 
-### GitHub App registration
+### GitHub App
 
-Create a GitHub App with:
+The backend authenticates as the App with `GITHUB_APP_ID` and `GITHUB_PRIVATE_KEY` (see
+[Runtime configuration](#runtime-configuration)); literal `\n` sequences in the key are converted to
+newlines. Customers install the App on their own organization or user account, so it must stay
+installable on any account. The backend mints a repository-scoped installation token for each
+operation and stores no GitHub tokens.
+
+The App needs these permissions:
 
 - Checks: read/write
 - Pull requests: read/write
@@ -23,22 +35,24 @@ Create a GitHub App with:
 - Metadata: read
 
 Pull request write access is required for the approval and rejection comments that Feature-Rec posts
-to the PR conversation. If you add or increase permissions after installing the App, approve the
-updated permissions on the existing installation (or reinstall the App). The next operation mints
-an installation token with the new grants; no backend restart is needed.
+to the PR conversation. If you add or increase permissions, every customer must approve the updated
+permissions on their installation (or reinstall the App). The next operation mints an installation
+token with the new grants; no backend restart is needed.
 
-Set the App credentials in the backend environment:
+The backend consumes no GitHub webhooks, so the App needs no webhook URL. To rotate the private key,
+generate a new key in the App settings, update `GITHUB_PRIVATE_KEY` and let the service restart,
+then delete the old key.
 
-```bash
-GITHUB_APP_ID=...
-GITHUB_PRIVATE_KEY='-----BEGIN RSA PRIVATE KEY-----...'
-```
+### Slack app
 
-The backend does not consume GitHub webhooks, so the App needs no webhook URL.
+The backend verifies every interactivity, event and command request with `SLACK_SIGNING_SECRET`, and
+uses `SLACK_APP_ID`, `SLACK_CLIENT_ID` and `SLACK_CLIENT_SECRET` for
+[hosted OAuth](#hosted-slack-oauth-configuration). Bot tokens are not configuration: each
+workspace's token arrives through its installation and is stored encrypted (see
+[Slack token encryption](#slack-token-encryption)). How signed requests are routed and how uninstall
+events are handled is described in [Slack lifecycle events](#slack-lifecycle-events).
 
-### Slack app registration
-
-Create a Slack app with bot scopes:
+The app needs these bot scopes:
 
 - `chat:write` — post validation messages and the first-channel greeting
 - `files:write` — upload the demo video
@@ -55,39 +69,35 @@ scope and does not require reinstalling an already configured app. `im:read` and
 `private_channel`; slash-command replies from DMs use their `response_url` instead
 of reading the conversation. Slack's `views.open` method requires no OAuth scope.
 
-Configure, replacing `<host>` with the public backend origin (or the ngrok host locally):
+Its URLs point at the public backend origin, the host of `FEATURE_REC_BASE_URL`:
 
 ```text
 Interactivity Request URL: https://<host>/api/slack/interactivity
 Event Subscriptions Request URL: https://<host>/api/slack/events
 Slash command: /feature-rec -> https://<host>/api/slack/commands
+OAuth Redirect URL: https://<host>/api/slack/oauth/callback
 ```
 
-- Subscribe the events URL to `member_joined_channel`, `app_uninstalled`, and `tokens_revoked`, and
-  enable **Delayed Events**: after Slack's immediate/1 min/5 min retries, delivery retries hourly
-  for 24 hours, and apps below 1,000 events per hour are exempt from auto-disable, so a temporarily
-  down backend cannot lose the subscription. A missed first join can be repaired automatically
-  only when the bot has exactly one channel membership; otherwise use the channel command.
-- On the `/feature-rec` slash command, enable **Escape channels, users, and links sent to your
-  app** so channel and user mentions arrive with stable `<#C…>` and `<@U…>` ids. Plain channel
+- The events URL is subscribed to `member_joined_channel`, `app_uninstalled`, and `tokens_revoked`,
+  with **Delayed Events** enabled: after Slack's immediate/1 min/5 min retries, delivery retries
+  hourly for 24 hours, and apps below 1,000 events per hour are exempt from auto-disable, so a
+  temporarily down backend cannot lose the subscription. A missed first join can be repaired
+  automatically only when the bot has exactly one channel membership; otherwise use the channel
+  command.
+- The `/feature-rec` slash command has **Escape channels, users, and links sent to your app**
+  enabled, so channel and user mentions arrive with stable `<#C…>` and `<@U…>` ids. Plain channel
   names are intentionally not resolved.
-- Reinstall the app after changing scopes. When upgrading a live install, update the Slack app
-  first and deploy the service second: the new grants sit unused until the deploy, so no
-  `missing_scope` window exists. If deployed backwards, `missing_scope` surfaces through the same
-  check-run error path until the reinstall happens.
+- Distribution is enabled, unlisted, so other workspaces can install the app. Token rotation stays
+  disabled: installations with expiring or refreshable tokens are rejected. The app requests no user
+  scopes.
+- If the public origin changes, update all four URLs together with `FEATURE_REC_BASE_URL`; see
+  [Railway deployment](#railway-deployment).
 
-Set the app-level signing secret and the token encryption key (see
-[Slack token encryption](#slack-token-encryption)):
-
-```bash
-SLACK_SIGNING_SECRET=...
-FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY=...
-```
-
-Each customer installs the app in their own workspace through the hosted OAuth page, and the
-operator provisions the resulting token into that customer's tenant; see
-[Onboarding a tenant](tenant-onboarding.md). How signed requests are routed and how uninstall events
-are handled is described in [Slack lifecycle events](#slack-lifecycle-events).
+Adding a scope is a coordinated change. Add it to the app first. Each workspace receives it only
+when it reinstalls: the customer opens the hosted start URL again and the operator provisions the
+new installation, as for a [token replacement](tenant-onboarding.md#change-or-remove-a-tenant).
+Deploy the service that uses the new scope after the workspaces have reinstalled; a workspace that
+has not reinstalled gets `missing_scope`, which surfaces through the check-run error path.
 
 ### Hosted Slack OAuth configuration
 
@@ -96,18 +106,9 @@ and its callback. Leave `SLACK_APP_ID`, `SLACK_CLIENT_ID` and `SLACK_CLIENT_SECR
 empty to disable both routes, which then return `404`. Otherwise provide all three together;
 partial or malformed configuration fails startup without echoing values. Configure
 `FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY` before accepting installations: without it the installation
-endpoints return `503`. Startup and `/health` need no Slack call.
-
-In the Slack app settings:
-
-- Register `FEATURE_REC_BASE_URL` plus `/api/slack/oauth/callback` as an OAuth redirect URL. Use
-  HTTPS.
-- Enable unlisted distribution so other workspaces can install the app.
-- Keep token rotation disabled; installations with expiring or refreshable tokens are rejected.
-- Request the bot scopes `chat:write`, `files:write`, `usergroups:read`, `channels:read`,
-  `groups:read` and `commands`, and no user scopes.
-- Keep the existing encryption key. The events, interactivity and command URLs and the app signing
-  secret continue to handle runtime Slack requests independently of OAuth.
+endpoints return `503`. Startup and `/health` need no Slack call. Keep the existing encryption key.
+The events, interactivity and command URLs and the app signing secret continue to handle runtime
+Slack requests independently of OAuth.
 
 The installation steps a customer follows are in
 [Install the Slack app](tenant-onboarding.md#install-the-slack-app). Local tests do not prove that
@@ -144,10 +145,12 @@ its `DATABASE_URL`. To use an existing database without Make, export the runtime
 variables yourself and run `pnpm run feature-rec:service`; that command does not
 load `.env` automatically.
 
-Set the target repository variable `FEATURE_REC_API_URL` to the same tunnel origin
-and pass `api-url: ${{ vars.FEATURE_REC_API_URL }}` to the action step. Then onboard a test tenant
-against the local backend as described in [Onboarding a tenant](tenant-onboarding.md), using the
-local admin commands shown there, before testing review traffic. Local rendering by itself does not
+Set the target repository variable `FEATURE_REC_API_URL` to the same tunnel origin and pass
+`api-url: ${{ vars.FEATURE_REC_API_URL }}` to the action step. Then onboard a test tenant against
+the local backend as described in [Onboarding a tenant](tenant-onboarding.md), using the local admin
+commands shown there, before testing review traffic. Real Slack traffic needs a Slack app whose
+request URLs point at the tunnel, and a local backend should not use production credentials; see
+[Appendix: registering the apps](#appendix-registering-the-apps). Local rendering by itself does not
 need the backend or its integration credentials.
 
 ## Production image
@@ -212,7 +215,8 @@ Only explicit loopback HTTP base URLs are accepted in development/tests; product
 Credentials, query strings, and fragments are rejected. The audience is the normalized base URL,
 with no independent audience override. Discovery/JWKS access is lazy until the first OIDC request,
 so a fresh-database `/health` smoke does not call GitHub or Slack. No runtime path accepts
-`FEATURE_REC_RUNNER_TOKEN`, `SLACK_BOT_TOKEN`, `FEATURE_REC_GITHUB_TOKEN`, or a `GITHUB_TOKEN` fallback.
+`FEATURE_REC_RUNNER_TOKEN`, `SLACK_BOT_TOKEN`, `FEATURE_REC_GITHUB_TOKEN`, or a `GITHUB_TOKEN`
+fallback; these variables are unused if they are still set.
 
 ## Railway deployment
 
@@ -452,18 +456,6 @@ newer artifact before starting the older service; do not hand-edit migration rec
 wave at a time, newest first. The newest artifact's admin command can run every older down step, so
 artifact D may perform each downgrade below. Never renumber an applied migration.
 
-### Deploy D release gate
-
-Merge (and therefore deploy) D only after C is the only serving version, its second observation
-window is clean, `validate-contract-readiness` reports no issues, and a fresh backup exists. Before
-merging, confirm with `migration-status` that `0010_multitenant_enforce` is the latest executed
-migration. Deploying D onto a database still at `0009` would apply `0010` and `0011` in one startup
-while B2, which still reads and writes the legacy table and columns, keeps serving. C's serving
-instances can keep running while D migrates because C does not touch the dropped schema. After D is
-healthy, delete the sealed hosted `FEATURE_REC_RUNNER_TOKEN` and `SLACK_BOT_TOKEN` values and any
-hosted `FEATURE_REC_GITHUB_TOKEN` or `GITHUB_TOKEN`. They existed only for the qualified rollback to
-deploy A, which no longer exists.
-
 ### Rollback runbooks
 
 **D-to-C rollback:**
@@ -626,16 +618,13 @@ cycles have null repository names, `0008`'s `down()` (and therefore deploy A) be
 once C has served traffic, except by restoring the pre-cutover backup.
 
 C's release gate was B2's live installation in two real workspaces passing the two-tenant smoke,
-a clean first observation window, a clean `validate-contract-readiness` report, and a fresh backup.
-B2's serving instances can keep running while C migrates because B2 already writes complete cycle
-identity and installed-workspace settings. B2's admin command is not safe against `0010`:
-`provision-tenant --replace-pairing` deletes and re-creates the workspace row, and the cascade then
-deletes that team's channel settings, reverting approver restrictions to unrestricted approval.
-The runbook therefore required pausing provisioning with the B2 artifact, including over
-`railway ssh` into a B2 instance, before merging C. Once C is the only serving version, provision
-with C's (or a later) admin command, which re-pairs the row in place. The second observation window
-after C confirms that no SQL or runtime path uses the legacy fields or table; it is part of the
-[Deploy D release gate](#deploy-d-release-gate).
+a clean first observation window, a clean `validate-contract-readiness` report, and a fresh backup;
+C passed it. B2's serving instances could keep running while C migrated because B2 already wrote
+complete cycle identity and installed-workspace settings. B2's admin command is not safe against
+`0010` or later: `provision-tenant --replace-pairing` deletes and re-creates the workspace row, and
+the cascade then deletes that team's channel settings, reverting approver restrictions to
+unrestricted approval. Provisioning with the B2 artifact was therefore paused before C was merged.
+Provision only with C's or a later admin command, which re-pairs the row in place.
 
 The one-time singleton backfill (`backfill-multitenancy`) and the deploy-A rollback preparation
 (`prepare-rollback-to-a`) were completed before the deploy-B cutover and exist only in the retained
@@ -721,3 +710,42 @@ carrying a cycle-B ID must leave B unchanged. Rename one repository, remove/re-a
 grant, and uninstall/re-provision one workspace; each operation must leave the other tenant working.
 An unrelated member-join event must not call `auth.test` or decrypt the token. Finally, confirm an
 already-posted stale validation can have its buttons cleared after GitHub access has disappeared.
+
+## Appendix: registering the apps
+
+Register a new GitHub App or Slack app only when the existing one is deleted, compromised beyond
+what rotating its credentials fixes, or must otherwise be replaced, or when a separate environment
+needs its own apps. Request URLs belong to a Slack app, so a staging deployment or a local backend
+behind a tunnel cannot share the production Slack app, and neither should use production
+credentials.
+
+Replacing a production app affects every tenant:
+
+- A new GitHub App has a new App ID and private key. Every customer must install it, and every
+  tenant must be provisioned again with its new installation ID; provisioning also needs a fresh
+  Slack installation, as in
+  [Change or remove a tenant](tenant-onboarding.md#change-or-remove-a-tenant).
+- A new Slack app has a new signing secret and client credentials and issues different bot tokens.
+  Every workspace must install it through the hosted start URL, and every tenant must be provisioned
+  again.
+
+### GitHub App registration
+
+1. Under **Developer settings → GitHub Apps** of the owning organization or account, create a GitHub
+   App that can be installed on any account, with the permissions listed in
+   [GitHub App](#github-app) and no active webhook.
+2. Generate a private key, then set `GITHUB_APP_ID` and `GITHUB_PRIVATE_KEY` in the backend
+   environment.
+
+### Slack app registration
+
+1. Create an app in the Slack app dashboard at `https://api.slack.com/apps`.
+2. Configure the bot scopes, request URLs, event subscriptions with **Delayed Events**, the
+   `/feature-rec` slash command with escaping, and the OAuth redirect URL listed in
+   [Slack app](#slack-app). A local backend uses its tunnel origin as `<host>`.
+3. Enable unlisted distribution and keep token rotation disabled.
+4. Set `SLACK_SIGNING_SECRET`, `SLACK_APP_ID`, `SLACK_CLIENT_ID` and `SLACK_CLIENT_SECRET` in the
+   backend environment. Keep the deployment's `FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY`; a new
+   environment generates its own as described in [Slack token encryption](#slack-token-encryption).
+5. Workspaces then install the app through the hosted start URL; see
+   [Onboarding a tenant](tenant-onboarding.md).

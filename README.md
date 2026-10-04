@@ -11,9 +11,9 @@ deterministic, silent MP4 without launching the target application. It also runs
 locally on bundled fixtures or git diffs.
 
 [How Feature-Rec works](docs/product.md) is the canonical description of the review flow,
-Slack commands and tenant isolation. [Onboarding a tenant](docs/tenant-onboarding.md) brings a
-customer onto the hosted service, and [Operations](docs/operations.md) covers app registration,
-running and deploying the backend, administration, and rollback.
+Slack commands and tenant isolation. [Onboarding a tenant](docs/tenant-onboarding.md)
+brings a customer onto the hosted service, and [Operations](docs/operations.md) covers the
+GitHub and Slack apps, running and deploying the backend, administration, and rollback.
 
 ## Repository structure
 
@@ -110,7 +110,7 @@ for packaging changes and the
   approval, channel routing, slash commands, tenant isolation, and failure behavior.
 - [Onboarding a tenant](docs/tenant-onboarding.md): GitHub App and Slack installation,
   provisioning, the consumer workflow, and tenant changes.
-- [Operations](docs/operations.md): app registration, runtime configuration, deployment,
+- [Operations](docs/operations.md): the GitHub and Slack apps, runtime configuration, deployment,
   administration commands, migrations, rollback, and smoke checks.
 - [Development agent instructions](AGENTS.md): shared working standards for coding agents.
 - [Multitenancy notes](docs/multitenancy-notes.md): historical single-tenant design notes and the

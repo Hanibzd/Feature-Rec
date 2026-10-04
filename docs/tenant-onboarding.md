@@ -14,8 +14,8 @@ the backend, and the admin command itself are covered in [Operations](operations
 
 The operator needs:
 
-- a running hosted backend with the GitHub App and Slack app registered, as described in
-  [Platform setup](operations.md#platform-setup);
+- a running hosted backend using the existing GitHub App and Slack app, described in
+  [Existing GitHub and Slack apps](operations.md#existing-github-and-slack-apps);
 - hosted Slack OAuth enabled, as described in
   [Hosted Slack OAuth configuration](operations.md#hosted-slack-oauth-configuration);
 - access to run the compiled admin command in the production environment, as described in

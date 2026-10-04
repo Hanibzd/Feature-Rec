@@ -4,8 +4,8 @@ This is the canonical description of Feature-Rec's behavior. It covers the curre
 the deploy-D contract of the
 [OIDC and multitenancy plan](plans/feature-rec-oidc-multitenancy-plan.md). Procedures live
 elsewhere: [Onboarding a tenant](tenant-onboarding.md) brings a customer onto the hosted service,
-and [Operations](operations.md) covers registering the apps and running, deploying and rolling back
-the backend.
+and [Operations](operations.md) covers the GitHub and Slack apps and running, deploying and rolling
+back the backend.
 
 ## Overview
 
@@ -319,7 +319,8 @@ Runner requests answer with:
 ## Related documentation
 
 - [Onboarding a tenant](tenant-onboarding.md): bring a customer onto the hosted service.
-- [Operations](operations.md): register the apps, run, deploy, administer and roll back the backend.
+- [Operations](operations.md): maintain the GitHub and Slack apps, and run, deploy, administer and
+  roll back the backend.
 - [README](../README.md): repository structure, local rendering and development checks.
 - [Multitenancy notes](multitenancy-notes.md): historical single-tenant design notes.
 - [Design and rollout plans](plans/): decisions and release history.

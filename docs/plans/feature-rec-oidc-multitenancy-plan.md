@@ -1,6 +1,6 @@
 # Feature-Rec OIDC and Multitenancy Dev Plan
 
-Status: PR A/B/B2/C merged; PR D contract implemented with `0011_multitenant_contract`, release gated on C serving, a clean second observation window and readiness report, and a fresh backup
+Status: PR A/B/B2/C merged; C passed its release gate, including B2's two-workspace verification; PR D contract implemented with `0011_multitenant_contract`, release gated on C serving, a clean second observation window and readiness report, a fresh backup, and a `0010` preflight
 
 Date: 2026-09-03
 
@@ -50,9 +50,10 @@ validator for them, so D's code change is the migration, comments stating that
 pre-cutover binaries are no longer rollback-compatible, and contracted-schema tests.
 Tests walk `0008` through `0011` forward/down/forward, prove artifact C refuses an
 `0011` database and starts after D's `migrate-to 0010`, and the image harness
-covers D-to-C with an optional retained C image. The runbook adds D's release gate,
-a `0010` preflight, D-to-C rollback and deletion of the sealed hosted secrets after
-D is healthy. Merging D and deleting those secrets remain operator release steps.
+covers D-to-C with an optional retained C image. D's release gate, its `0010`
+preflight and the deletion of the sealed hosted secrets live in the D section below
+and in the D pull request; the operations runbook covers D-to-C rollback only. Merging
+D and deleting those secrets remain operator release steps.
 
 Scope: `packages/core`, `packages/action`, `packages/service`, migrations,
 operator tooling, CI, and product documentation
@@ -1168,7 +1169,11 @@ references the legacy fields/table.
 ### PR/deploy D — contract
 
 Only after deploy C is serving, the second observation window is clean, and a
-fresh backup exists, add:
+fresh backup exists, add the migration below. Before merging, confirm with
+`migration-status` that `0010_multitenant_enforce` is the latest executed
+migration: on a database still at `0009`, for example after a C-to-B2 rollback,
+D's startup would apply `0010` and `0011` together while B2, which still reads
+and writes the legacy schema, keeps serving.
 
 `0011_multitenant_contract`:
 
@@ -2663,8 +2668,8 @@ test plan. Decisions and issues:
 - **C and D collapsing into one startup (resolved procedurally, open as a code guard).**
   On a database still at `0009` (for example after a C-to-B2 rollback), D's startup would
   apply `0010` and `0011` together while B2, which still reads and writes the legacy schema,
-  serves. The runbook requires `migration-status` to show `0010_multitenant_enforce` before
-  merging D. A code guard could refuse `0011` when `0010` was recorded in the same
+  serves. D's release gate in this plan requires `migration-status` to show
+  `0010_multitenant_enforce` before merging D. A code guard could refuse `0011` when `0010` was recorded in the same
   transaction and legacy routes hold data. It was not added: fresh databases legitimately
   apply both together, and C has already merged.
 - **Image harness (resolved).** The optional retained image is now C: it must refuse
@@ -2698,6 +2703,5 @@ Accepted or open:
   migration edits them. Deriving it from the provider would weaken the frozen-name checks.
 - **Retained-image coverage (accepted).** The real-binary harness check now targets C. B2
   and B refusal remain covered by in-process static-provider tests.
-- **B2 live-verification wording (open).** The status line now lists only merged PRs. The
-  B2 section still calls two-workspace installation a release gate. Confirm the
-  recorded outcome of that gate before editing that section.
+- **B2 live-verification wording (resolved).** The maintainer confirmed that C passed its
+  release gate, including B2's two-workspace verification; the status line records it.
