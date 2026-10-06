@@ -94,7 +94,7 @@ export function heuristicFrontendVisible(files: string[], patch: string): {
   return {
     frontendVisible: true,
     confidence: 0.65,
-    reason: "Changed files include frontend/UI candidates. ANTHROPIC_API_KEY was not set, so Feature-Rec used the conservative heuristic.",
+    reason: "Changed files include frontend/UI candidates. No LLM API key was set, so Feature-Rec used the conservative heuristic.",
     userImpact: patch.includes("className") ? "Visual styling or component markup may have changed." : "",
     files: frontendFiles,
   };

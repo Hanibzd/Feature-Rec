@@ -101,7 +101,10 @@ try {
     pull_request: { number: 7, state: "open", draft: false, title: "Change", user: { login: "ignored" }, base: { sha: head.trim() }, head: { sha: head.trim() } },
   }));
   const childEnv = { ...process.env };
-  delete childEnv.ANTHROPIC_API_KEY;
+  // Any LLM key or provider in the developer's shell would make a live call.
+  for (const name of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "FEATURE_REC_LLM_API_KEY", "FEATURE_REC_LLM_PROVIDER"]) {
+    delete childEnv[name];
+  }
   delete childEnv.FEATURE_REC_ALLOW_HEURISTIC_CLASSIFIER;
   const runAction = () => run(process.execPath, ["--import", "tsx", "src/index.ts", "--repo", repoRoot, "--event", eventPath, "--api-url", apiUrl], { cwd: actionRoot, env: childEnv });
   for (const reason of ["closed", "draft", "stale_head"]) {
