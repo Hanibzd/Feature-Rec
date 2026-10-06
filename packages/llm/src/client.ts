@@ -70,14 +70,17 @@ export function llmFailure(
   const status = typeof rawStatus === "number" ? rawStatus : undefined;
   const raw = err instanceof Error ? err.message : String(err);
   // Both SDKs format API errors as "<status> <API message or JSON body>".
-  const apiMessage =
+  // Redact before clipping: a key cut in half would no longer match.
+  const apiMessage = redactSecrets(
     bodyMessage((err as { error?: unknown } | null)?.error) ??
-    (status === undefined ? raw : raw.replace(new RegExp(`^${status}\\s+`), ""));
+      (status === undefined ? raw : raw.replace(new RegExp(`^${status}\\s+`), "")),
+    context.apiKey,
+  );
   const clipped =
     apiMessage.length > MAX_API_MESSAGE_LENGTH ? `${apiMessage.slice(0, MAX_API_MESSAGE_LENGTH)}…` : apiMessage;
   const where = [`provider=${context.provider}`, `model=${context.model}`];
   if (status !== undefined) where.push(`HTTP ${status}`);
-  return new LlmError(`LLM request failed (${where.join(", ")}): ${redactSecrets(clipped, context.apiKey)}`, {
+  return new LlmError(`LLM request failed (${where.join(", ")}): ${clipped}`, {
     provider: context.provider,
     model: context.model,
     ...(status === undefined ? {} : { status }),

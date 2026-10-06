@@ -7,7 +7,7 @@ import type {
   ChatCompletionCreateParamsNonStreaming,
 } from "openai/resources/chat/completions";
 import { anthropicClientOptions, createAnthropicClient } from "../src/anthropic";
-import { redactSecrets } from "../src/client";
+import { llmFailure, redactSecrets } from "../src/client";
 import { createOpenAiCompatibleClient, openAiClientOptions, stripThinking } from "../src/openai";
 import { createLlmClient, formatUsage, LlmError, resolveLlmConfig, type LlmConfig } from "../src/index";
 
@@ -418,6 +418,16 @@ await assert.rejects(
   assert.ok(error instanceof LlmError);
   assert.equal(error.status, undefined);
   assert.match(error.message, /^LLM request failed \(provider=openai-compatible, model=the-model\): Request timed out/);
+}
+// A key straddling the 500-character clip is still fully redacted.
+{
+  const longKey = "plain-long-fake-key-0123456789abcdefghij";
+  const error = llmFailure(new OpenAI.BadRequestError(400, { message: `${"x".repeat(490)}${longKey}` }, undefined, new Headers()), {
+    provider: "openai-compatible",
+    model: "the-model",
+    apiKey: longKey,
+  });
+  assert.ok(!error.message.includes(longKey.slice(0, 10)));
 }
 assert.equal(
   redactSecrets(`key=${OPENAI_KEY} header Bearer abc.def masked or-****1234`, OPENAI_KEY),
