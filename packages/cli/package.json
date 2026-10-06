@@ -18,7 +18,6 @@
     "selftest": "tsx scripts/validate-selftest.mts && tsx scripts/agent-selftest.mts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.106.0",
     "@autodemo/video": "workspace:*",
     "@feature-rec/llm": "workspace:*",
     "@remotion/bundler": "4.0.484",

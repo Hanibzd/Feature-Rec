@@ -23,9 +23,6 @@ importers:
       '@actions/core':
         specifier: ^3.0.1
         version: 3.0.1
-      '@anthropic-ai/sdk':
-        specifier: ^0.106.0
-        version: 0.106.0(zod@3.25.76)
       '@autodemo/cli':
         specifier: workspace:*
         version: link:../cli
@@ -51,9 +48,6 @@ importers:
 
   packages/cli:
     dependencies:
-      '@anthropic-ai/sdk':
-        specifier: ^0.106.0
-        version: 0.106.0(zod@3.25.76)
       '@autodemo/video':
         specifier: workspace:*
         version: link:../video
@@ -2636,13 +2630,6 @@ snapshots:
   '@actions/io@3.0.2': {}
 
   '@alloc/quick-lru@5.2.0': {}
-
-  '@anthropic-ai/sdk@0.106.0(zod@3.25.76)':
-    dependencies:
-      json-schema-to-ts: 3.1.1
-      standardwebhooks: 1.0.0
-    optionalDependencies:
-      zod: 3.25.76
 
   '@anthropic-ai/sdk@0.106.0(zod@4.3.6)':
     dependencies:
