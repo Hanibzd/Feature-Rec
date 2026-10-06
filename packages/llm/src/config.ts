@@ -18,6 +18,12 @@ export const DEFAULT_MAX_TOKENS = 16000;
 // Matches the SDKs' own default, so Anthropic-only clients keep today's timeout.
 export const DEFAULT_TIMEOUT_MS = 600_000;
 
+export const LLM_API_KEY_VARIABLES = [
+  "FEATURE_REC_LLM_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "OPENAI_API_KEY",
+  "OPENROUTER_API_KEY",
+] as const;
 export const API_KEY_VARIABLES =
   "FEATURE_REC_LLM_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY or OPENROUTER_API_KEY";
 

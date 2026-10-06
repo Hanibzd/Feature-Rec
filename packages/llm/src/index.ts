@@ -7,6 +7,7 @@ export {
   API_KEY_VARIABLES,
   DEFAULT_ANTHROPIC_MODEL,
   DEFAULT_MAX_TOKENS,
+  LLM_API_KEY_VARIABLES,
   LLM_PROVIDERS,
   resolveLlmConfig,
   type LlmConfig,
