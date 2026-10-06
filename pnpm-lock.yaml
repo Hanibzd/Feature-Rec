@@ -57,6 +57,9 @@ importers:
       '@autodemo/video':
         specifier: workspace:*
         version: link:../video
+      '@feature-rec/llm':
+        specifier: workspace:*
+        version: link:../llm
       '@remotion/bundler':
         specifier: 4.0.484
         version: 4.0.484(postcss@8.5.15)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
