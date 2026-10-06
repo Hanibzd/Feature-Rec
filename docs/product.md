@@ -76,8 +76,9 @@ PR.
 
 ## Change classification
 
-With `ANTHROPIC_API_KEY` set in the workflow, the action asks Claude whether the PR contains a
-frontend-visible change worth validating. It sends the PR title, the changed file list and the diff
+With an LLM key set in the workflow, the action asks the configured model whether the PR contains
+a frontend-visible change worth validating. The provider and models are set in
+[LLM provider settings](tenant-onboarding.md#llm-provider-settings). It sends the PR title, the changed file list and the diff
 (80 lines of context, truncated to 80,000 characters).
 
 - Not frontend-visible, and therefore auto-accepted: backend-only, environment-only, docs-only,
@@ -88,11 +89,12 @@ frontend-visible change worth validating. It sends the PR title, the changed fil
 The classifier also names the files that carry the visible change; the renderer prefers those
 within the limits described in [Demo videos](#demo-videos).
 
-Without `ANTHROPIC_API_KEY`, a filename heuristic runs instead. Frontend candidates are `.tsx`,
+Without an LLM key or provider, a filename heuristic runs instead. Frontend candidates are `.tsx`,
 `.jsx`, `.css` and `.scss` files, plus `.ts` and `.js` files inside a directory named `app`,
 `pages`, `components` or `ui`; files containing `.test.`, `.spec.` or `.stories.` never count. A
 diff without candidates is auto-accepted. A diff with candidates fails the run with a request for
-the key, unless `FEATURE_REC_ALLOW_HEURISTIC_CLASSIFIER=1` treats it as frontend-visible. Rendering
+a key, unless `FEATURE_REC_ALLOW_HEURISTIC_CLASSIFIER=1` treats it as frontend-visible. A
+provider configured without its key fails the run instead of falling back to the heuristic. Rendering
 also needs the key (see [Demo videos](#demo-videos)), so in practice every repository whose PRs need
 review must provide it. The workflow settings are listed in
 [Add the workflow](tenant-onboarding.md#add-the-workflow).
@@ -108,13 +110,14 @@ TSX/JSX source.` That happens, for example, when the first three such files are 
 a later one survives. Changes that touch only stylesheets or plain modules cannot be rendered
 either.
 
-For each source, a Claude-based replication agent turns the before and after source into a
+For each source, an LLM-based replication agent turns the before and after source into a
 self-contained Remotion scene, styled with the repository's Tailwind configuration and global CSS
 when it finds them. The target application is never built, launched or executed. The scenes are
 composed into one H.264 MP4 without an audio track, which the action uploads (up to 500 MB).
 
-Generation needs `ANTHROPIC_API_KEY`. Without it, or when generation fails, only the bundled
-fixture scenes (`dark-mode-toggle` and `invite-members`) can render, and any other change fails.
+Generation needs an LLM key. Without one, or when generation fails, only the bundled fixture
+scenes (`dark-mode-toggle` and `invite-members`) can render, and any other change fails with the
+original cause, such as a provider error or a response truncated at `FEATURE_REC_MAX_TOKENS`.
 
 ## GitHub check and comments
 
@@ -315,7 +318,7 @@ Runner requests answer with:
 - Only GitHub.com Actions OIDC for `pull_request` workflows. A custom issuer is a configuration
   seam, not GitHub Enterprise Server support.
 - Rendering covers only the first three changed `.tsx` or `.jsx` files in path order and needs
-  `ANTHROPIC_API_KEY`; see [Demo videos](#demo-videos).
+  an LLM key; see [Demo videos](#demo-videos).
 - Slack Enterprise Grid organization installs and Slack token rotation are not supported.
 - No GitHub webhooks: installation and repository changes take effect at the next authorization.
 - No self-serve signup or onboarding UI; onboarding is operator-assisted, and workflows are added

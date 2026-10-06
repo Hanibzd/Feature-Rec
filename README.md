@@ -24,6 +24,7 @@ This is a pnpm monorepo:
 | `packages/action` | GitHub Action: PR events, diff classification, renderer invocation, and backend calls. |
 | `packages/service` | Fastify backend: Slack review, GitHub Checks/comments, tenant administration, and PostgreSQL state. |
 | `packages/core` | Shared schemas, action/service contracts, copy constants, and helpers. |
+| `packages/llm` | Provider-agnostic LLM client for the action classifier and the scene agent; not part of the backend image. |
 | `packages/cli` | Analyze, generate scenes, render video, and write local release artifacts. |
 | `packages/video` | Remotion compositions and scenes used by the renderer. |
 | `fixtures` | Before/after UI examples for local demos. |
@@ -47,7 +48,8 @@ pnpm run demo --offline
 The demo uses the bundled known-good scenes without an LLM key and writes
 `out/demo.mp4`, `out/CHANGELOG.md`, `out/pr-comment.md`, and `out/plan.json`.
 `--offline` skips AI generation; rendering may still need browser/font downloads.
-To use live scene generation, export `ANTHROPIC_API_KEY` and omit `--offline`.
+To use live scene generation, export an LLM key and omit `--offline`; see
+[LLM providers](#llm-providers).
 
 For a single fixture or an interactive preview:
 
@@ -59,6 +61,23 @@ pnpm run studio
 To run the complete GitHub-to-Slack review flow, follow the
 [local backend setup](docs/operations.md#local-backend) and
 [onboard a test tenant](docs/tenant-onboarding.md) against it.
+
+## LLM providers
+
+Feature-Rec calls an LLM twice per reviewed PR: to classify the diff and to generate each Remotion
+scene. It works with Anthropic, OpenAI, OpenRouter and any OpenAI-compatible API. Existing
+workflows that pass only `ANTHROPIC_API_KEY` keep `claude-sonnet-4-6` with no change. The
+variables and action inputs are listed in
+[LLM provider settings](docs/tenant-onboarding.md#llm-provider-settings).
+
+Scene generation asks for up to 16,000 output tokens of Remotion code and is the demanding call.
+Models tested on the `dark-mode-toggle` and `invite-members` fixtures:
+
+| Provider | Model | Scene passes validation | MP4 renders | Matches the component |
+| --- | --- | --- | --- | --- |
+| Anthropic | `claude-sonnet-4-6` | Reference | Reference | Reference |
+| OpenAI | — | Not tested yet | Not tested yet | Not tested yet |
+| OpenRouter | — | Not tested yet | Not tested yet | Not tested yet |
 
 ## Development commands
 

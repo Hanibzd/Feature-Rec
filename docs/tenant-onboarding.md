@@ -26,7 +26,8 @@ The customer needs:
 - a GitHub administrator who can install a GitHub App on their organization or user account;
 - someone allowed to install apps in exactly one Slack workspace;
 - a public or private Slack channel for reviews that is not shared with another organization;
-- an Anthropic API key for the repositories' workflows.
+- an LLM API key for the repositories' workflows: Anthropic, OpenAI, OpenRouter or any
+  OpenAI-compatible API; see [LLM provider settings](#llm-provider-settings).
 
 A tenant pairs exactly one GitHub account with exactly one Slack workspace, and neither can belong
 to another tenant. Collect these values during onboarding:
@@ -135,8 +136,10 @@ In each repository that should use Feature-Rec:
 2. Pin the action. The example references `Hanibzd/Feature-Rec/packages/action@main`; replace `main`
    with a tested release tag or commit SHA so that changes to the action reach the repository only
    when you update the pin.
-3. Add an `ANTHROPIC_API_KEY` repository or organization secret. The example passes it to the
-   action, which needs it for every PR that requires review.
+3. Add an LLM API key as a repository or organization secret. The example passes
+   `ANTHROPIC_API_KEY` to the action, which needs a key for every PR that requires review; for
+   another provider, use the commented OpenRouter variant in the example and the
+   [LLM provider settings](#llm-provider-settings).
 4. Leave the action's `api-url` input unset for the hosted service; it defaults to
    `https://api.feature-rec.com`. A self-hosted backend sets `api-url` to its public origin, which
    must equal the backend's `FEATURE_REC_BASE_URL` because it is the OIDC audience.
@@ -145,14 +148,38 @@ In each repository that should use Feature-Rec:
    check, not the workflow job (`Analyze and render`): the job finishes while the check waits for
    the Slack decision.
 
-Optional environment variables for the action step:
+### LLM provider settings
+
+The classifier and the scene-generation agent call one LLM provider. Anthropic uses its native API;
+`openai`, `openrouter` and `openai-compatible` use the OpenAI chat completions format, which also
+covers Mistral, Groq, Together, DeepSeek, Gemini's OpenAI-compatible endpoint and proxies such as
+LiteLLM or vLLM. A workflow that only passes `ANTHROPIC_API_KEY` needs nothing else.
+
+Each setting is an environment variable of the action step; most also exist as an action input
+(`with:`). A filled input wins over the variable, and an empty input leaves the variable alone.
+
+| Variable | Action input | Effect |
+| --- | --- | --- |
+| `FEATURE_REC_LLM_PROVIDER` | `llm-provider` | `anthropic`, `openai`, `openrouter` or `openai-compatible`. When unset, the first key found among `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` and `OPENAI_API_KEY` selects the provider, and the log names the choice when several are set. |
+| `FEATURE_REC_LLM_API_KEY` | `llm-api-key` | Key for the selected provider; when empty, the provider's own variable is read. |
+| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY` | — | Provider-specific keys. |
+| `FEATURE_REC_LLM_BASE_URL` | `llm-base-url` | Base URL of the OpenAI-compatible API. Defaults to `https://api.openai.com/v1` for `openai` and `https://openrouter.ai/api/v1` for `openrouter`; required for `openai-compatible`; ignored for `anthropic`. |
+| `FEATURE_REC_MODEL` | `model` | Model for classification and scene generation. Defaults to `claude-sonnet-4-6` for `anthropic`; required for every other provider. |
+| `FEATURE_REC_CLASSIFIER_MODEL` | `classifier-model` | Optional lighter model for classification; defaults to `FEATURE_REC_MODEL`. |
+| `FEATURE_REC_MAX_TOKENS` | `max-tokens` | Output token cap for scene generation, a positive integer; defaults to 16,000. Lower it for models with a smaller output limit. |
+| `FEATURE_REC_LLM_TIMEOUT_MS` | — | Timeout per LLM request, a positive integer; defaults to 600,000 (10 minutes). Requests are retried twice on rate limits and server errors. |
+| `AUTODEMO_MODEL`, `AUTODEMO_MAX_TOKENS` | — | Deprecated aliases of `FEATURE_REC_MODEL` and `FEATURE_REC_MAX_TOKENS`, used with a warning when the new variable is unset. `FEATURE_REC_MODEL` now also selects the scene-generation model, so it wins over `AUTODEMO_MODEL` when both are set. |
+
+With no key and no provider, the heuristic classifier runs and only the bundled scenes can render.
+A provider set without its key, a missing base URL or model, or an invalid number fails the run with
+a message naming the variable to set; it never falls back to the heuristic. The action masks the key
+in the workflow log, and provider errors reported on the check run never include it.
+
+Other optional environment variables for the action step:
 
 | Variable | Effect |
 | --- | --- |
-| `FEATURE_REC_ALLOW_HEURISTIC_CLASSIFIER=1` | Without `ANTHROPIC_API_KEY`, treat filename-heuristic frontend candidates as frontend-visible instead of failing. Rendering still needs the key. |
-| `FEATURE_REC_MODEL` | Claude model for classification; defaults to `AUTODEMO_MODEL`, then `claude-sonnet-4-6`. |
-| `AUTODEMO_MODEL` | Claude model for scene generation; defaults to `claude-sonnet-4-6`. |
-| `AUTODEMO_MAX_TOKENS` | Output token limit for scene generation; defaults to 16,000. |
+| `FEATURE_REC_ALLOW_HEURISTIC_CLASSIFIER=1` | Without an LLM key, treat filename-heuristic frontend candidates as frontend-visible instead of failing. Rendering still needs a key. |
 
 The classification and rendering rules are described in
 [Change classification](product.md#change-classification) and [Demo videos](product.md#demo-videos).
@@ -241,7 +268,10 @@ encrypts the token itself, and reports provider errors as they occur.
 | The workflow fails with `Could not obtain GitHub Actions OIDC token` | The job lacks `permissions: id-token: write`. Add it. |
 | A backend call fails with `401` | The action's `api-url` does not match the backend's `FEATURE_REC_BASE_URL`, or the workflow was not triggered by `pull_request`. |
 | A backend call fails with `403` | The tenant is not provisioned or is disabled, or its GitHub App installation does not grant the repository. Provision the tenant or grant the repository. |
-| `ANTHROPIC_API_KEY is required to classify frontend-visible changes` | Add the secret; see [Add the workflow](#add-the-workflow). |
+| `An LLM API key is required to classify frontend-visible changes` | Add a key secret; see [Add the workflow](#add-the-workflow). |
+| `FEATURE_REC_LLM_PROVIDER is "…" but no API key is set`, `… needs FEATURE_REC_MODEL` or `… needs FEATURE_REC_LLM_BASE_URL` | Set the named variable or action input; see [LLM provider settings](#llm-provider-settings). |
+| `Agent response was truncated at … output tokens` | The scene hit the output cap. Raise `FEATURE_REC_MAX_TOKENS` if the model allows it, or split the change. |
+| `LLM request failed (provider=…, model=…, HTTP 400)` mentioning `FEATURE_REC_MAX_TOKENS` | The model may cap output below `FEATURE_REC_MAX_TOKENS`; lower it. Otherwise the provider's message explains the rejected request. |
 | `Invite @Feature-Rec to your Slack review channel, then re-run.` | No usable review channel: the bot is in no channel, was removed from the selected channel, or is in several channels with none selected. Invite the bot or run `/feature-rec channel #channel-name`, then rerun the workflow. |
 | `Feature-Rec is present in multiple channels…` | Run `/feature-rec channel #channel-name`, then rerun the workflow. |
 | `Feature-Rec is not currently in the selected review channel…` | Invite the bot back or select another channel, then rerun the workflow. |
