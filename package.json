@@ -16,7 +16,7 @@
     "typecheck": "pnpm -r run typecheck",
     "lint": "eslint \"packages/**/*.{ts,tsx,mts}\" --max-warnings=0",
     "feature-rec:service": "pnpm --filter @feature-rec/service run dev",
-    "feature-rec:selftest": "pnpm --filter @feature-rec/core run selftest && pnpm --filter @feature-rec/service run selftest && pnpm --filter @feature-rec/action run selftest",
+    "feature-rec:selftest": "pnpm --filter @feature-rec/core run selftest && pnpm --filter @feature-rec/llm run selftest && pnpm --filter @feature-rec/service run selftest && pnpm --filter @feature-rec/action run selftest",
     "selftest": "pnpm feature-rec:selftest && pnpm --filter @autodemo/cli run selftest"
   },
   "devDependencies": {

@@ -1,5 +1,5 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { ClassifierResultSchema, type ClassifierResult } from "@feature-rec/core";
+import { API_KEY_VARIABLES, createLlmClient, resolveLlmConfig } from "@feature-rec/llm";
 import { heuristicFrontendVisible } from "./diff";
 
 export function extractClassifierJson(text: string): unknown {
@@ -15,26 +15,25 @@ export async function classifyFrontendVisible(input: {
   patch: string;
   prTitle: string;
 }): Promise<ClassifierResult> {
-  if (!process.env.ANTHROPIC_API_KEY) {
+  // Throws on an explicit but incomplete configuration: a misconfigured key must
+  // not silently fall back to the heuristic.
+  const config = resolveLlmConfig(process.env);
+  if (!config) {
     const heuristic = ClassifierResultSchema.parse(heuristicFrontendVisible(input.files, input.patch));
     if (heuristic.frontendVisible && process.env.FEATURE_REC_ALLOW_HEURISTIC_CLASSIFIER !== "1") {
       throw new Error(
-        "ANTHROPIC_API_KEY is required to classify frontend-visible changes. Set FEATURE_REC_ALLOW_HEURISTIC_CLASSIFIER=1 to use the conservative heuristic fallback.",
+        `An LLM API key is required to classify frontend-visible changes (set ${API_KEY_VARIABLES}). Set FEATURE_REC_ALLOW_HEURISTIC_CLASSIFIER=1 to use the conservative heuristic fallback.`,
       );
     }
     return heuristic;
   }
 
-  const client = new Anthropic();
-  const message = await client.messages.create({
-    model: process.env.FEATURE_REC_MODEL ?? process.env.AUTODEMO_MODEL ?? "claude-sonnet-4-6",
-    max_tokens: 1200,
+  const response = await createLlmClient(config).complete({
+    model: config.classifierModel,
+    maxTokens: 1200,
     system:
       "You classify pull request diffs for Feature-Rec. Return strict JSON only. No markdown.",
-    messages: [
-      {
-        role: "user",
-        content: `Decide whether this PR contains a frontend-visible change worth sending for Slack validation.
+    user: `Decide whether this PR contains a frontend-visible change worth sending for Slack validation.
 
 For this run, return false for backend-only, env-only, docs-only, tests-only, dependency-only, lockfile-only, or CI-only changes.
 Return true for UI, UX, copy, layout, styling, route, visual state, or frontend user-flow changes.
@@ -57,17 +56,11 @@ Diff:
 \`\`\`diff
 ${input.patch}
 \`\`\``,
-      },
-    ],
   });
 
-  if (message.stop_reason === "max_tokens") {
+  if (response.truncated) {
     throw new Error("Classifier response was truncated.");
   }
 
-  const raw = message.content
-    .map((block) => (block.type === "text" ? block.text : ""))
-    .join("")
-    .trim();
-  return ClassifierResultSchema.parse(extractClassifierJson(raw));
+  return ClassifierResultSchema.parse(extractClassifierJson(response.text));
 }

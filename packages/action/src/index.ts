@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
+import { setSecret } from "@actions/core";
 import { isAllowedPullRequestEvent, normalizeOidcAudience, SLACK_NO_CHANNEL_MESSAGE } from "@feature-rec/core";
 import { renderFeatureRecVideo } from "@autodemo/cli/feature-rec";
+import { LLM_API_KEY_VARIABLES } from "@feature-rec/llm";
 import { acceptCycle, failCycle, SettledBackendError, startCycle, uploadVideo } from "./backend";
 import { classifyFrontendVisible } from "./classifier";
 import { collectDiffContext } from "./diff";
@@ -30,6 +32,18 @@ function arg(name: string, fallback = ""): string {
 }
 
 async function main(): Promise<void> {
+  // Mask every candidate LLM key before anything can log it. GitHub masks
+  // values that come from `secrets.*`, but not keys passed another way. Done
+  // without resolving the config, so a configuration error still reaches the
+  // check run through failCycle instead of failing here. Only on a runner:
+  // elsewhere the `::add-mask::` command would print the key in clear.
+  if (process.env.GITHUB_ACTIONS === "true") {
+    for (const name of LLM_API_KEY_VARIABLES) {
+      const key = process.env[name]?.trim();
+      if (key) setSecret(key);
+    }
+  }
+
   const repoRoot = path.resolve(arg("--repo", process.cwd()));
   const eventPath = path.resolve(arg("--event", process.env.GITHUB_EVENT_PATH ?? ""));
   const apiUrl = normalizeOidcAudience(arg("--api-url", process.env.FEATURE_REC_API_URL ?? ""), {

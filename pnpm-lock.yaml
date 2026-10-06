@@ -23,15 +23,15 @@ importers:
       '@actions/core':
         specifier: ^3.0.1
         version: 3.0.1
-      '@anthropic-ai/sdk':
-        specifier: ^0.106.0
-        version: 0.106.0(zod@3.25.76)
       '@autodemo/cli':
         specifier: workspace:*
         version: link:../cli
       '@feature-rec/core':
         specifier: workspace:*
         version: link:../core
+      '@feature-rec/llm':
+        specifier: workspace:*
+        version: link:../llm
       zod:
         specifier: ^3.23.8
         version: 3.25.76
@@ -48,21 +48,21 @@ importers:
 
   packages/cli:
     dependencies:
-      '@anthropic-ai/sdk':
-        specifier: ^0.106.0
-        version: 0.106.0(zod@3.25.76)
       '@autodemo/video':
         specifier: workspace:*
         version: link:../video
+      '@feature-rec/llm':
+        specifier: workspace:*
+        version: link:../llm
       '@remotion/bundler':
         specifier: 4.0.484
-        version: 4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
+        version: 4.0.484(postcss@8.5.15)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       '@remotion/renderer':
         specifier: 4.0.484
         version: 4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       '@remotion/tailwind-v4':
         specifier: 4.0.484
-        version: 4.0.484(@remotion/bundler@4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0))(@rspack/core@1.7.11)(webpack@5.105.0)
+        version: 4.0.484(@remotion/bundler@4.0.484(postcss@8.5.15)(react-dom@19.0.0(react@19.0.0))(react@19.0.0))(@rspack/core@1.7.11)(webpack@5.105.0(postcss@8.5.15))
       commander:
         specifier: ^12.1.0
         version: 12.1.0
@@ -88,6 +88,25 @@ importers:
       zod:
         specifier: ^3.23.8
         version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^24.13.3
+        version: 24.13.3
+      tsx:
+        specifier: ^4.19.2
+        version: 4.22.4
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/llm:
+    dependencies:
+      '@anthropic-ai/sdk':
+        specifier: ^0.106.0
+        version: 0.106.0(zod@4.3.6)
+      openai:
+        specifier: 7.28.0
+        version: 7.28.0(undici@6.28.0)(ws@8.21.0)(zod@4.3.6)
     devDependencies:
       '@types/node':
         specifier: ^24.13.3
@@ -143,10 +162,10 @@ importers:
     dependencies:
       '@remotion/bundler':
         specifier: 4.0.484
-        version: 4.0.484(postcss@8.5.15)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
+        version: 4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       '@remotion/cli':
         specifier: 4.0.484
-        version: 4.0.484(postcss@8.5.15)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
+        version: 4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       '@remotion/google-fonts':
         specifier: 4.0.484
         version: 4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
@@ -158,7 +177,7 @@ importers:
         version: 4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       '@remotion/tailwind-v4':
         specifier: 4.0.484
-        version: 4.0.484(@remotion/bundler@4.0.484(postcss@8.5.15)(react-dom@19.0.0(react@19.0.0))(react@19.0.0))(@rspack/core@1.7.11)(webpack@5.105.0(postcss@8.5.15))
+        version: 4.0.484(@remotion/bundler@4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0))(@rspack/core@1.7.11)(webpack@5.105.0)
       react:
         specifier: 19.0.0
         version: 19.0.0
@@ -1972,6 +1991,30 @@ packages:
     resolution: {integrity: sha512-7x81NCL719oNbsq/3mh+hVrAWmFuEYUqrq/Iw3kUzH8ReypT9QQ0BLoJS7/G9k6N81XjW4qHWtjWwe/9eLy1EQ==}
     engines: {node: '>=12'}
 
+  openai@7.28.0:
+    resolution: {integrity: sha512-HSY4fFLflQGYe2kvO0atm6/GzhD61gpyiOZZUvO4nptMUhuB1to2K3wwFpFqc5gfEK0SxyIIFiu1yE2MtygWcA==}
+    engines: {node: '>=22.0.0'}
+    peerDependencies:
+      '@aws-sdk/credential-provider-node': '>=3.972.0 <4'
+      '@smithy/hash-node': '>=4.3.0 <5'
+      '@smithy/signature-v4': '>=5.4.0 <6'
+      undici: '>=5 <9'
+      ws: ^8.21.0
+      zod: ^3.25 || ^4.0
+    peerDependenciesMeta:
+      '@aws-sdk/credential-provider-node':
+        optional: true
+      '@smithy/hash-node':
+        optional: true
+      '@smithy/signature-v4':
+        optional: true
+      undici:
+        optional: true
+      ws:
+        optional: true
+      zod:
+        optional: true
+
   optionator@0.9.4:
     resolution: {integrity: sha512-6IpQ7mKUxRcZNLIObR0hz7lxsapSSIYNZJwXPGeF0mTVqGKFIXj1DQcMoT22S3ROcLyY/rz0PWaWZ9ayWmad9g==}
     engines: {node: '>= 0.8.0'}
@@ -2588,12 +2631,12 @@ snapshots:
 
   '@alloc/quick-lru@5.2.0': {}
 
-  '@anthropic-ai/sdk@0.106.0(zod@3.25.76)':
+  '@anthropic-ai/sdk@0.106.0(zod@4.3.6)':
     dependencies:
       json-schema-to-ts: 3.1.1
       standardwebhooks: 1.0.0
     optionalDependencies:
-      zod: 3.25.76
+      zod: 4.3.6
 
   '@babel/helper-string-parser@7.29.7': {}
 
@@ -2997,14 +3040,14 @@ snapshots:
       react-dom: 19.0.0(react@19.0.0)
       remotion: 4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
 
-  '@remotion/cli@4.0.484(postcss@8.5.15)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)':
+  '@remotion/cli@4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0)':
     dependencies:
-      '@remotion/bundler': 4.0.484(postcss@8.5.15)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
+      '@remotion/bundler': 4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       '@remotion/media-utils': 4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       '@remotion/player': 4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       '@remotion/renderer': 4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       '@remotion/studio': 4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
-      '@remotion/studio-server': 4.0.484(postcss@8.5.15)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
+      '@remotion/studio-server': 4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       '@remotion/studio-shared': 4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       dotenv: 17.3.1
       minimist: 1.2.6
@@ -3101,11 +3144,11 @@ snapshots:
 
   '@remotion/streaming@4.0.484': {}
 
-  '@remotion/studio-server@4.0.484(postcss@8.5.15)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)':
+  '@remotion/studio-server@4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0)':
     dependencies:
       '@babel/parser': 7.24.1
       '@babel/types': 7.24.0
-      '@remotion/bundler': 4.0.484(postcss@8.5.15)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
+      '@remotion/bundler': 4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       '@remotion/renderer': 4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       '@remotion/studio-shared': 4.0.484(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       memfs: 3.4.3
@@ -4348,6 +4391,12 @@ snapshots:
       define-lazy-prop: 2.0.0
       is-docker: 2.2.1
       is-wsl: 2.2.0
+
+  openai@7.28.0(undici@6.28.0)(ws@8.21.0)(zod@4.3.6):
+    optionalDependencies:
+      undici: 6.28.0
+      ws: 8.21.0
+      zod: 4.3.6
 
   optionator@0.9.4:
     dependencies:
