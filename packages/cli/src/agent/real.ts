@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
+import ts from "typescript";
 import { GENERATED_DIR, VIDEO_DIR, VIDEO_SRC } from "../paths";
 
 /**
@@ -48,8 +49,24 @@ const DYNAMIC_IMPORT_RE = /\bimport\s*\(|\brequire\s*\(/;
 const TYPE_ONLY_RE = /^\s*(?:import|export)\s+type\s[^;]*?from\s*["'][^"']+["'];?|^\s*import\s*\{\s*(?:type\s+[\w$]+(?:\s+as\s+[\w$]+)?\s*,?\s*)+\}\s*from\s*["'][^"']+["'];?/gm;
 const withoutTypeOnlyImports = (source: string) => source.replace(TYPE_ONLY_RE, "");
 
+/**
+ * Imports that exist at runtime. TypeScript elides imports whose bindings are only used as
+ * types (`import { User } from "@prisma/client"` used in a props type), exactly like the
+ * renderer's bundler, so those never need resolving. Falls back to the raw source for
+ * plain JS and on transpile errors.
+ */
 function specifiers(source: string): string[] {
-  return [...withoutTypeOnlyImports(source).matchAll(SPECIFIER_RE)].map((m) => m[3]);
+  let runtime = withoutTypeOnlyImports(source);
+  try {
+    runtime = ts.transpileModule(runtime, {
+      fileName: "module.tsx",
+      reportDiagnostics: false,
+      compilerOptions: { jsx: ts.JsxEmit.Preserve, module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ESNext },
+    }).outputText;
+  } catch {
+    // keep the textual view
+  }
+  return [...runtime.matchAll(SPECIFIER_RE)].map((m) => m[3]);
 }
 
 function rewriteSpecifiers(source: string, map: Map<string, string>): string {

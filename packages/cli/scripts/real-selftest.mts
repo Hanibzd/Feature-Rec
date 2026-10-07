@@ -78,7 +78,7 @@ try {
     });
     return r === null && reasons.length === 1 && !fs.existsSync(dir);
   };
-  ok("unknown npm package falls back to reconstruction", unsupported(`import x from "some-provider-sdk";\nexport function Card() { return <div />; }`));
+  ok("unknown npm package falls back to reconstruction", unsupported(`import x from "some-provider-sdk";\nexport function Card() { return <div>{x}</div>; }`));
   ok("CSS module import falls back to reconstruction", unsupported(`import s from "./card.module.css";\nexport function Card() { return <div className={s.a} />; }`));
   ok("dynamic import falls back to reconstruction", unsupported(`export function Card() { void import("./x"); return <div />; }`));
 
@@ -88,6 +88,8 @@ try {
   const typedCopy = typedReal ? fs.readFileSync(path.join(dir, "after", file), "utf8") : "";
   ok("type-only imports are ignored and removed from the copy", typedReal !== null && !typedCopy.includes("@prisma/client") && !typedCopy.includes("next-auth"));
   ok("next/navigation is rewritten to the render stub", /kit\/stubs\/next-navigation/.test(typedCopy));
+  const elided = `import { User } from "@prisma/client";\nexport function Card(p: { user: User }) { return <p>{p.user.name}</p>; }`;
+  ok("imports used only as types are elided like the bundler does", prepareRealComponents({ id: ID, file, before: "", after: elided, globalsCss: "", read: (rev, p) => (p === file ? elided : read(rev, p)) }) !== null);
 
   const noRepo = prepareRealComponents({ id: ID, file, before: "", after: repo.after[file], globalsCss: "" });
   ok("without repository access, only React-only files qualify", noRepo === null);
@@ -97,7 +99,7 @@ try {
 
 // Reconstruction context: local imports (code and CSS modules) of the AFTER file.
 const ctxRepo: Record<string, string> = {
-  "src/components/Pricing.tsx": `import { PlanNote } from "./PlanNote";\nimport { Button } from "@/components/ui/button";\nimport x from "some-pkg";`,
+  "src/components/Pricing.tsx": `import { PlanNote } from "./PlanNote";\nimport { Button } from "@/components/ui/button";\nimport x from "some-pkg";\nexport const P = () => <div>{x}<PlanNote /><Button /></div>;`,
   "src/components/PlanNote.tsx": `import styles from "./PlanNote.module.css";\nexport function PlanNote() { return <p className={styles.note} />; }`,
   "src/components/PlanNote.module.css": `.note { border-left: 3px solid #6366f1; }`,
   "src/components/ui/button.tsx": `export function Button() { return <button />; }`,

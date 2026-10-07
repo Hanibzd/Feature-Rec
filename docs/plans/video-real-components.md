@@ -50,7 +50,27 @@ with two changes; 15 to 25 generations per prompt, `claude-sonnet-4-6`):
 Cost per scene at `claude-sonnet-4-6` list prices: ~6.1¢ before, ~3.7¢ after, ~2.2¢ with a warm
 prompt cache.
 
+## Field tests
+
+- **Test repository** (feature-rec/feature-rec-test-repo #4–#6, action pinned to this branch, real
+  backend and Slack): a new local component with custom theme colors and a real click (real
+  components, 2 files), the confidence panel (real, 1 file) and a CSS-module import (reconstruction
+  with the module's styles from the local-import context). The first runs exposed two bugs fixed
+  here: copied components hidden from Tailwind by `.gitignore`, and rebuilds missing the source of
+  in-context components.
+- **Open-source repository** (shadcn-ui/taxonomy, replayed locally): a copy change in the sign-in
+  form and an avatar fallback change. Both fell back to reconstruction (Radix UI, next-auth,
+  react-hook-form are not shipped by the renderer). The copy change came out right; the avatar
+  scene invented a dashboard header around the avatar. These runs led to type-only import
+  elision, Next routing stubs, the alias fix for in-context files and the caption guard.
+
 ## Open issues
+
+- shadcn codebases mostly fall back to reconstruction because their primitives import Radix UI.
+  Shipping the non-portal Radix primitives (slot, avatar, label, separator, switch, checkbox, tabs,
+  …) would cover many of them; portal-based ones (dialog, popover, dropdown, tooltip, select)
+  also need their portals routed into the Stage overlay.
+- Reconstruction of very small components (an avatar) tends to invent surrounding UI.
 
 - Real mode cannot show `hover:` styles or replay typing into real inputs (clicks only).
 - Components that need providers (router, data fetching, i18n) or packages the renderer does not
