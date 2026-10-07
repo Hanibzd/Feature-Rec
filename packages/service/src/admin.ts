@@ -26,7 +26,7 @@ Usage:
     (downgrades also require --expect-current, --service-stopped and --traffic-paused)
   node dist/admin.js validate-contract-readiness --environment <name> [--require-future-cycle-keys]
   node dist/admin.js provision-tenant --environment <name> --confirm
-    --installation-id <id> --repository <owner/repo> [--tenant-id <uuid>]
+    --installation-id <id> --check-repository <owner/repo> [--tenant-id <uuid>]
     [--selected-channel-id <id>] [--replace-pairing] [--slack-installation-id <uuid>]
     (without --slack-installation-id, reads the Slack bot token from a non-echoing TTY prompt or stdin)
   node dist/admin.js slack-installation-status --environment <name> --slack-installation-id <uuid>
@@ -80,7 +80,7 @@ function requireEncryptionKey(env: ServiceEnv): Buffer {
 
 function parseRepository(value: string): { owner: string; repo: string } {
   const match = /^([^/]+)\/([^/]+)$/.exec(value);
-  if (!match) throw new Error("--repository must be in owner/repo form");
+  if (!match) throw new Error("--check-repository must be in owner/repo form");
   return { owner: match[1], repo: match[2] };
 }
 
@@ -193,7 +193,7 @@ async function main(): Promise<void> {
       requireConfirmation(args);
       const encryptionKey = requireEncryptionKey(env);
       const installationId = requireFlag(args, "installation-id");
-      const repository = parseRepository(requireFlag(args, "repository"));
+      const checkRepository = parseRepository(requireFlag(args, "check-repository"));
       const slackInstallationId = flag(args, "slack-installation-id");
       const token = slackInstallationId === undefined ? await readSecret() : undefined;
       const report = await provisionTenant({
@@ -203,7 +203,7 @@ async function main(): Promise<void> {
         slackInstallationId,
         encryptionKey,
         installationId,
-        repository,
+        checkRepository,
         tenantId: flag(args, "tenant-id"),
         selectedChannelId: flag(args, "selected-channel-id"),
         replacePairing: boolFlag(args, "replace-pairing"),

@@ -196,7 +196,7 @@ export type ProvisionReport = {
   slackTeamId: string;
   githubInstallationId: string;
   githubAccountId: string;
-  repositoryId: string;
+  checkedRepositoryId: string;
   selectedChannelId: string | null;
   replacedPairings: string[];
 };
@@ -208,7 +208,9 @@ export async function provisionTenant(input: {
   slackInstallationId?: string;
   encryptionKey: Buffer;
   installationId: string;
-  repository: { owner: string; repo: string };
+  // Any one repository the installation grants. It is checked before
+  // activation and not stored: the tenant pairs the whole installation.
+  checkRepository: { owner: string; repo: string };
   tenantId?: string;
   selectedChannelId?: string;
   replacePairing?: boolean;
@@ -235,8 +237,8 @@ export async function provisionTenant(input: {
     }),
     input.providers.inspectInstallationRepository(
       input.installationId,
-      input.repository.owner,
-      input.repository.repo,
+      input.checkRepository.owner,
+      input.checkRepository.repo,
     ).catch((error: unknown) => {
       if (pending) throw new Error("GitHub provider validation failed for pending installation; check App permissions and repository access, then retry");
       throw error;
@@ -373,7 +375,7 @@ export async function provisionTenant(input: {
       slackTeamId: slack.teamId,
       githubInstallationId: repository.installationId,
       githubAccountId: repository.githubAccountId,
-      repositoryId: repository.repositoryId,
+      checkedRepositoryId: repository.repositoryId,
       selectedChannelId,
       replacedPairings: conflicts,
     };

@@ -32,7 +32,7 @@ to another tenant. Collect these values during onboarding:
 | Value | Where it comes from |
 | --- | --- |
 | GitHub installation ID | [Install the GitHub App](#install-the-github-app) |
-| One repository, as `owner/repo` | A repository the installation grants, used for the end-to-end check |
+| One repository to check, as `owner/repo` | Any repository the installation grants; see [Provision the tenant](#provision-the-tenant) |
 | Slack installation ID and workspace ID | The completion page of [Install the Slack app](#install-the-slack-app) |
 | Review channel ID | Slack channel details, at the bottom of the **About** tab |
 
@@ -72,7 +72,7 @@ The operator activates the tenant from the production service:
 ```bash
 railway ssh -- node dist/admin.js provision-tenant --environment production --confirm \
   --slack-installation-id <Slack-installation-id> \
-  --installation-id <GitHub-installation-id> --repository <owner/repo> \
+  --installation-id <GitHub-installation-id> --check-repository <owner/repo> \
   --selected-channel-id <Slack-channel-id>
 ```
 
@@ -82,16 +82,22 @@ Before writing anything, the command:
   belongs to the same workspace and bot, so an installation that was removed or revoked at Slack
   cannot be activated;
 - checks that the bot is a member of the selected channel;
-- checks that the repository belongs to the GitHub installation and that the App can mint a token
-  scoped to that repository.
+- checks that the repository to check belongs to the GitHub installation and that the App can mint
+  a token scoped to that repository.
 
 It then creates the tenant, or reuses the one that already owns these integrations, stores the
 exact validated encrypted token, records the GitHub installation, enables the tenant and marks the
 pending installation consumed, all in one transaction. It prints a JSON report with `tenantId`,
-`slackTeamId`, `githubInstallationId`, `githubAccountId`, `repositoryId`, `selectedChannelId` and
+`slackTeamId`, `githubInstallationId`, `githubAccountId`, `checkedRepositoryId`, `selectedChannelId` and
 `replacedPairings`. Record the `tenantId` with the customer's details.
 
-- `--repository` is only the end-to-end check; it does not limit the tenant to that repository.
+- `--check-repository` names any one repository that the installation grants. The installation ID
+  comes from a URL that the customer copies, so the command checks it against a repository that the
+  customer names: GitHub must report the same installation and account for that repository, and the
+  App must be able to mint a token scoped to it, as the runtime does for every request. This catches
+  a wrong installation ID or a missing repository grant before the tenant goes live. The command
+  does not store the repository. The tenant pairs the whole installation, so every repository that
+  the installation grants works after activation, provided that it has the workflow.
 - Without `--selected-channel-id`, an existing selection for the workspace is kept. Otherwise a
   channel is selected later: by the bot's next channel join, by `/feature-rec channel`, or when the
   first validation finds the bot in exactly one channel.
@@ -117,7 +123,7 @@ pnpm --filter @feature-rec/service run build
 ```bash
 node --env-file=.env packages/service/dist/admin.js provision-tenant \
   --environment development --confirm --slack-installation-id <Slack-installation-id> \
-  --installation-id <GitHub-installation-id> --repository <owner/repo> \
+  --installation-id <GitHub-installation-id> --check-repository <owner/repo> \
   --selected-channel-id <Slack-channel-id>
 ```
 
@@ -169,7 +175,7 @@ All commands and their rules are listed in [Slash commands](product.md#slash-com
 
 ## Verify the first review
 
-1. Open a PR in a provisioned repository that changes a `.tsx` or `.jsx` component visibly.
+1. In a repository that has the workflow, open a PR that changes a `.tsx` or `.jsx` component visibly.
 2. Confirm that the `Feature-Rec` check shows `Feature-Rec: analyzing`, then
    `Feature-Rec: pending validation`, and that the video and validation message reach the review
    channel.
@@ -183,8 +189,8 @@ If anything fails, see [Troubleshooting](#troubleshooting).
 
 - **Replace the Slack token or reinstall the app in the same workspace.** The customer opens the
   start URL again; the new pending installation does not affect the active credential. Provision
-  it with `--slack-installation-id`, the tenant's `--tenant-id` and its GitHub installation and
-  repository. The workspace keeps its channel selection and settings.
+  it with `--slack-installation-id`, the tenant's `--tenant-id`, its GitHub installation and a
+  repository to check. The workspace keeps its channel selection and settings.
 - **Reinstall the GitHub App on the same account.** Provisioning always needs a Slack credential,
   so the customer also opens the Slack start URL again. Provision the new pending installation
   with the new GitHub installation ID and the tenant's `--tenant-id`; the old installation record
@@ -224,7 +230,7 @@ non-echoing terminal prompt, or from stdin when it is not a terminal:
 
 ```bash
 railway ssh -- node dist/admin.js provision-tenant --environment production --confirm \
-  --installation-id <GitHub-installation-id> --repository <owner/repo> \
+  --installation-id <GitHub-installation-id> --check-repository <owner/repo> \
   --selected-channel-id <Slack-channel-id>
 ```
 
