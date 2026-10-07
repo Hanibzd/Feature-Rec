@@ -6,6 +6,7 @@ import {
   Easing,
   interpolate,
   spring,
+  getInputProps,
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
@@ -98,12 +99,24 @@ export const Stage: React.FC<{
   const [, setTick] = useState(0);
   const transSnap = useRef<TransitionSnapshot | null>(null);
   const transBackup = useRef<InlineBackup>(new Map());
+  /** DOM of the real component right before the last click, to detect a click that does nothing. */
+  const clickCheck = useRef<{ scope: HTMLElement; html: string; target: string; frame: number } | null>(null);
   if (replayed.current.key !== pastClicks.length) replayed.current = { key: pastClicks.length, done: false };
 
   useLayoutEffect(() => {
     const root = rootRef.current;
     if (!root) return;
     restoreInline(transBackup.current);
+    if (clickCheck.current) {
+      // Second pass after a replay: did the last click change the real component?
+      const { scope, html, target, frame: at } = clickCheck.current;
+      clickCheck.current = null;
+      if (scope.isConnected && scope.innerHTML === html) {
+        const message = `Feature-Rec: the pointer click at frame ${at} on ${target} changed nothing in the real component (already selected? not interactive?). Click an element that changes the UI.`;
+        if ((getInputProps() as { strictClicks?: boolean }).strictClicks) throw new Error(message);
+        console.warn(message);
+      }
+    }
     if (!replayed.current.done) {
       replayed.current.done = true;
       transSnap.current = null;
@@ -130,8 +143,14 @@ export const Stage: React.FC<{
           } else el = sc.querySelector<HTMLElement>(`[data-focus="${k}"]`);
         }
         // Snapshot styles right before the last click, to replay the components' transitions.
-        if (c === pastClicks[pastClicks.length - 1]) transSnap.current = snapshotTransitions(root);
-        (el as HTMLElement | null)?.click();
+        const clicked = el as HTMLElement | null;
+        if (c === pastClicks[pastClicks.length - 1]) {
+          transSnap.current = snapshotTransitions(root);
+          // Real components only (rendered inside <Morph>): rebuilt UIs have no handlers to run.
+          const scope = clicked?.closest<HTMLElement>("[data-final-height]");
+          if (scope) clickCheck.current = { scope, html: scope.innerHTML, target: k, frame: c };
+        }
+        clicked?.click();
       }
       // Re-render now so the clicked components' state updates land before this frame is shot.
       if (pastClicks.length > 0) setTick((t) => t + 1);
@@ -162,12 +181,15 @@ export const Stage: React.FC<{
         : { x: r.left - rr.left, y: r.top - rr.top, w: r.width, h: r.height };
     };
     const next: Record<string, Rect> = { __root: { x: 0, y: 0, w: rr.width, h: rr.height } };
+    // Keys of targets that live in the screen-space overlay (toasts, modals): see framing().
+    const inOverlay = (el: Element) => Boolean(overlay?.contains(el));
     const focusEls = [
       ...root.querySelectorAll<HTMLElement>("[data-focus]"),
       ...(overlay?.querySelectorAll<HTMLElement>("[data-focus]") ?? []),
     ];
     focusEls.filter((el) => !el.closest("[data-morph-ghost]")).forEach((el) => {
       next[el.dataset.focus as string] = toUi(el);
+      if (inOverlay(el)) next[`overlay:${el.dataset.focus}`] = { x: 0, y: 0, w: 0, h: 0 };
     });
     // Targets given by visible text or selector (real, untouched components have no data-focus).
     const scopes = [root, ...(overlay ? [overlay] : [])];
@@ -189,22 +211,45 @@ export const Stage: React.FC<{
       } else if (k.startsWith("sel:")) {
         for (const sc of scopes) el = el ?? sc.querySelector(k.slice(4));
       }
-      if (el) next[k] = toUi(el);
+      if (el) {
+        next[k] = toUi(el);
+        if (inOverlay(el)) next[`overlay:${k}`] = { x: 0, y: 0, w: 0, h: 0 };
+      }
     }
-    // A <PageHint> is context, not part of the component: if it sits inside the "ui"
-    // element, frame only the ui's other children.
+    // Frame what the component actually paints (backgrounds, borders, shadows, text, media), not
+    // the box of the element marked "ui": a full-width wrapper would otherwise shrink the
+    // component. A <PageHint> is context and the BEFORE copy inside <Morph> is invisible: both
+    // are skipped.
     const uiNode = root.querySelector<HTMLElement>('[data-focus="ui"]');
-    const hint = uiNode?.querySelector<HTMLElement>("[data-page-hint]");
-    if (uiNode && hint) {
-      let branch: HTMLElement = hint;
-      while (branch.parentElement && branch.parentElement !== uiNode) branch = branch.parentElement;
-      const others = Array.from(uiNode.children).filter((c) => c !== branch) as HTMLElement[];
-      if (others.length > 0) {
-        const rs = others.map(toUi);
-        const left = Math.min(...rs.map((r) => r.x));
-        const top = Math.min(...rs.map((r) => r.y));
-        const right = Math.max(...rs.map((r) => r.x + r.w));
-        const bottom = Math.max(...rs.map((r) => r.y + r.h));
+    if (uiNode) {
+      const painted: Rect[] = [];
+      let visited = 0;
+      const transparent = (c: string) => c === "transparent" || /rgba\([^)]*,\s*0\)$/.test(c);
+      const walk = (el: Element) => {
+        for (const child of Array.from(el.children)) {
+          if (++visited > 4000) return;
+          if (child.hasAttribute("data-page-hint") || child.hasAttribute("data-morph-ghost")) continue;
+          const cs = getComputedStyle(child);
+          if (cs.display === "none" || cs.visibility === "hidden") continue;
+          const r = child.getBoundingClientRect();
+          const ownText = Array.from(child.childNodes).some((n) => n.nodeType === Node.TEXT_NODE && n.textContent?.trim());
+          const paints =
+            ownText ||
+            !transparent(cs.backgroundColor) ||
+            cs.backgroundImage !== "none" ||
+            cs.boxShadow !== "none" ||
+            (parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth) > 0 && !transparent(cs.borderTopColor)) ||
+            ["IMG", "svg", "VIDEO", "CANVAS", "INPUT", "TEXTAREA", "SELECT"].includes(child.tagName);
+          if (paints && r.width > 0 && r.height > 0) painted.push(toUi(child));
+          walk(child);
+        }
+      };
+      walk(uiNode);
+      if (painted.length > 0) {
+        const left = Math.min(...painted.map((r) => r.x));
+        const top = Math.min(...painted.map((r) => r.y));
+        const right = Math.max(...painted.map((r) => r.x + r.w));
+        const bottom = Math.max(...painted.map((r) => r.y + r.h));
         next.ui = { x: left, y: top, w: right - left, h: bottom - top };
       }
     }
@@ -222,6 +267,8 @@ export const Stage: React.FC<{
     });
     root.style.transform = cameraTransform;
     next.__pending = { x: 0, y: 0, w: 0, h: pending };
+    // Whether the scene placed its own <PageHint> (the Stage adds one for page chrome otherwise).
+    if (root.querySelector("[data-page-hint]:not([data-auto-page-hint])")) next.__sceneHint = { x: 0, y: 0, w: 0, h: 0 };
     if (!same(rects, next)) setRects(next);
   });
   useEffect(() => {
@@ -238,8 +285,34 @@ export const Stage: React.FC<{
   const overview = Math.min(fitUi(OVERVIEW_FILL), MAX_OVERVIEW_SCALE);
   // Headers and toolbars: too wide to be readable whole, so a focus may crop them.
   const wide = ui.w / Math.max(ui.h, 1) > 5;
+  // Page chrome (a header, toolbar or footer: wide and short) reads as such only with the page it
+  // frames. When the scene did not add a <PageHint>, the Stage adds the same quiet block: below
+  // chrome at the top of the layout, above it otherwise.
+  const autoHint =
+    wide && !rects.__sceneHint && rects.ui
+      ? (() => {
+          const w = Math.min(ui.w - 48, 1152);
+          const below = ui.y < 400;
+          const lum = (() => {
+            const hex = /^#([0-9a-f]{6})$/i.exec(background.trim())?.[1];
+            if (!hex) return 1;
+            const [r, g, b] = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+            return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+          })();
+          return {
+            left: ui.x + (ui.w - w) / 2,
+            top: below ? ui.y + ui.h + 32 : ui.y - 32 - 520,
+            width: w,
+            height: 520,
+            background: lum < 0.4 ? "rgba(255,255,255,0.045)" : "rgba(15,23,42,0.045)",
+          };
+        })()
+      : null;
 
-  const framing = (id: string) => {
+  const framing = (requested: string) => {
+    // A modal or toast is drawn in screen space, already in view at the UI's scale: focusing it
+    // would make the camera chase a target that moves with the camera. Keep the UI framing.
+    const id = rects[`overlay:${requested}`] ? "ui" : requested;
     const r = rectOf(id);
     // Nudge only when the element is small on screen at overview size.
     const onScreen = Math.min(r.h * overview, (r.w * overview) / 3);
@@ -260,7 +333,11 @@ export const Stage: React.FC<{
     return {
       ls: Math.log(s),
       cx: axis(r.x + r.w / 2, Math.min(ui.x, r.x), Math.max(ui.x + ui.w, r.x + r.w), halfW),
-      cy: axis(r.y + r.h / 2, Math.min(ui.y, r.y), Math.max(ui.y + ui.h, r.y + r.h), halfH),
+      // Page chrome sits where it lives on a page: a header in the top quarter of the frame, a
+      // footer in the bottom quarter, the page (hint) filling the rest.
+      cy:
+        axis(r.y + r.h / 2, Math.min(ui.y, r.y), Math.max(ui.y + ui.h, r.y + r.h), halfH) +
+        (wide ? (ui.y < 400 ? 0.5 : -0.5) * halfH : 0),
     };
   };
 
@@ -346,6 +423,13 @@ export const Stage: React.FC<{
           transform: `translate(${tx}px, ${ty}px) scale(${scale})`,
         }}
       >
+        {autoHint ? (
+          <div
+            data-page-hint=""
+            data-auto-page-hint=""
+            style={{ position: "absolute", borderRadius: 16, pointerEvents: "none", ...autoHint }}
+          />
+        ) : null}
         <StageContext.Provider value={{ overlay, scale }}>
           <React.Fragment key={pastClicks.length}>
             {typeof children === "function" ? children({ frame, hovered, pressed }) : children}

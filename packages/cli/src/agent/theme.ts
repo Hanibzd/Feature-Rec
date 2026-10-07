@@ -37,14 +37,15 @@ const safeValue = (v: string) => v.length < 300 && !/[;{}]|<\/?style/i.test(v);
 function flatten(prefix: string, value: unknown, out: string[]): void {
   if (typeof value === "string" || typeof value === "number") {
     const v = String(value);
-    if (safeValue(v)) out.push(`  --${prefix}: ${v};`);
+    // shadcn-style `sans: ["var(--font-sans)", ...]` would define the variable from itself
+    if (safeValue(v) && !v.includes(`var(--${prefix})`)) out.push(`  --${prefix}: ${v};`);
     return;
   }
   if (Array.isArray(value)) {
     // fontFamily: ["Inter", "sans-serif"]; fontSize: ["0.875rem", { lineHeight: "1.25rem" }]
     if (prefix.startsWith("font-") && value.every((v) => typeof v === "string")) {
       const v = value.map((f: string) => (/\s/.test(f) && !/^["']/.test(f) ? `"${f}"` : f)).join(", ");
-      if (safeValue(v)) out.push(`  --${prefix}: ${v};`);
+      if (safeValue(v) && !v.includes(`var(--${prefix})`)) out.push(`  --${prefix}: ${v};`);
     } else if (typeof value[0] === "string") flatten(prefix, value[0], out);
     return;
   }

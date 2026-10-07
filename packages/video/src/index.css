@@ -1,6 +1,7 @@
 @import "tailwindcss";
 /* The target repository's Tailwind theme (custom colors, radii, CSS variables), see
  * @autodemo/cli agent/theme.ts. */
+@import "./kit/fonts.css";
 @import "./target-theme.css";
 
 /*

@@ -88,6 +88,8 @@ export function withoutComponentsShownInContext<T extends { file: string; after:
   });
 }
 
+const isNoOpClick = (err: Error) => /changed nothing in the real component/.test(err.message);
+
 export async function renderFeatureRecVideo(input: {
   repoRoot: string;
   sources: FeatureRecSource[];
@@ -135,23 +137,34 @@ export async function renderFeatureRecVideo(input: {
   regenerateRegistry();
   writePlan(buildPlan(ok));
   try {
-    return await renderDemo();
+    return await renderDemo({ strictClicks: true });
   } catch (firstError) {
     let error = firstError as Error;
     // A theme the renderer cannot compile must never cost the video: retry without it.
-    if (themeDeclarations > 0) {
+    if (themeDeclarations > 0 && !isNoOpClick(error)) {
       log.warn(`Render failed with the target theme (${error.message.split("\n")[0]}); retrying without it.`);
       resetTargetTheme();
       try {
-        return await renderDemo();
+        return await renderDemo({ strictClicks: true });
       } catch (err) {
         error = err as Error;
       }
     }
     const repaired = await repairScenes(error.stack ?? error.message);
-    if (repaired.length === 0) throw error;
-    log.warn(`Render failed; repaired ${repaired.join(", ")} and rendering again.`);
-    regenerateRegistry();
-    return renderDemo();
+    if (repaired.length > 0) {
+      log.warn(`Render failed; repaired ${repaired.join(", ")} and rendering again.`);
+      regenerateRegistry();
+      try {
+        return await renderDemo({ strictClicks: true });
+      } catch (err) {
+        error = err as Error;
+      }
+    }
+    // A click that still does nothing is a weak demo, not a reason to send no video.
+    if (isNoOpClick(error)) {
+      log.warn("A pointer click still changes nothing after the repair; rendering the video anyway.");
+      return renderDemo({ strictClicks: false });
+    }
+    throw error;
   }
 }

@@ -39,18 +39,25 @@ SHOW HOW IT WORKS
   - restyle / copy change of an existing element: Swap the element in place.
 - Reproduce interaction states only from the code: hover:, active:, disabled:, focus states,
   open/closed states. Never invent a result the code does not produce.
+- Click what changes the UI: read the initial state in the code (useState defaults, selected or
+  active props) and click the element that moves it to another state, never the option that is
+  already selected.
 
 FIDELITY
 - Reuse the component's markup, classNames and copy exactly. Data shown = data in the code.
 - Custom Tailwind tokens of the target repo: see THEME in the request.
 - Imported child components without source (Button, Card, Dialog, Input...): rebuild them plainly
   from their name, props and the tokens (shadcn/ui conventions if the path says so).
+- Small components (avatar, badge, icon, chip, single button) are shown ALONE, centered: 2-4
+  instances side by side with realistic props covering the states the change affects (e.g. with
+  and without an image). Never invent a header, sidebar, list or page around them.
 - Lay the UI out as it sits on its page, at a realistic size (viewport 1440px wide). Render ONLY
   the changed component (and the dialog/menu it opens). Its surround is the plain page
   background: no empty boxes, cards, hero sections, skeleton lines or sample page content.
-- Exception, page chrome (header, nav bar, footer, sidebar): ONE <PageHint /> is REQUIRED where
-  the page content sits (below a header, above a footer, beside a sidebar), OUTSIDE the
-  data-focus="ui" element, so the viewer understands what the component is. Nothing else.
+- Exception, page chrome (header, nav bar, footer, sidebar): ONE <PageHint /> goes where the page
+  content sits (below a header, above a footer, beside a sidebar), OUTSIDE the data-focus="ui"
+  element, so the viewer understands what the component is (the Stage adds one under wide chrome
+  if you forget). Nothing else.
 - Wide components (headers, nav bars, toolbars) read small at overview size: always add a
   focus moment on the changed part so the Stage can bring it to a readable size. With several
   changes in one component, focus each one in turn (~40 frames each).
@@ -93,7 +100,8 @@ and give each element you point at or focus a short data-focus id.
 <Modal open={progress} placement?="center"|"right"|"bottom-right" dim?={0.4}>  anything that covers
   the screen in the product: dialog (center), drawer/sheet (right), toast (bottom-right, no dim).
   Rendered in screen space: the backdrop covers the WHOLE frame and the content keeps the UI scale.
-  Put only the panel inside (no backdrop, no fixed wrapper); data-focus targets inside work.
+  Put only the panel inside (no backdrop, no fixed wrapper); data-focus targets inside work for the
+  pointer, but a modal/toast is never a focus moment (it is already in view).
 <PageHint tone?="light"|"dark" height?={520} maxWidth?={1152} />  one soft block standing for
   "the rest of the page", only next to page chrome (see FIDELITY).
 <Morph at={frame} before={...} after={...} />  REAL COMPONENTS only (see the request): animates the
@@ -151,8 +159,9 @@ ${real.importLines}
   e.g. focus={[{ from: 50, text: "Start free trial" }]}. NEVER add invisible anchor elements or
   guess coordinates: the Stage measures the real elements.
   Pointer clicks are REAL: at each click frame the Stage clicks the targeted element, so the
-  component runs its own onClick/state and its own CSS transitions. To show how a new control
-  works, move the pointer to it and click it (a toggle without text: { selector: "button[aria-pressed]" }
+  component runs its own onClick/state and its own CSS transitions. A click that changes nothing
+  fails the render. To show how a new control works, move the pointer to it and click the element
+  that changes its state (e.g. a period switch defaulting to "Monthly": click "Annual") (a toggle without text: { selector: "button[aria-pressed]" }
   or a similar attribute selector from the code). Never fake a state by redrawing the component.
   Hover-only styles cannot be shown. Do not click links that would navigate away.
   Passive content (text, panel, badge) needs no pointer.

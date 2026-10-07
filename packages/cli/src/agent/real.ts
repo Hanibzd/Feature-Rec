@@ -121,6 +121,15 @@ function importLine(source: string, alias: string, from: string): string | null 
   return named ? `import { ${named[1]} as ${alias} } from "${from}";` : null;
 }
 
+const SYSTEM_FONTS = /^["']?(ui-sans-serif|system-ui|-apple-system|BlinkMacSystemFont|Segoe UI|Roboto|Helvetica Neue|Helvetica|Arial|sans-serif)["']?$/i;
+
+/** The app's own font, unless it is a system stack: those render with the kit's Inter. */
+function appFontFamily(css: string): string | null {
+  const stack = cssValue(css, "body", "font-family");
+  const first = stack?.split(",")[0]?.trim();
+  return stack && first && !SYSTEM_FONTS.test(first) ? stack : null;
+}
+
 function cssValue(css: string, selector: string, prop: string): string | null {
   const block = new RegExp(`${selector}\\s*\\{([^}]*)\\}`, "m").exec(css)?.[1];
   const value = block && new RegExp(`(?:^|;|\\s)${prop}\\s*:\\s*([^;]+);`).exec(block)?.[1];
@@ -246,7 +255,7 @@ export function prepareRealComponents(input: {
   return {
     importLines: lines.join("\n"),
     hasBefore: Boolean(before),
-    appFont: cssValue(globalsCss, "body", "font-family"),
+    appFont: appFontFamily(globalsCss),
     pageBackground: cssValue(globalsCss, "body", "background(?:-color)?") ?? (globalsCss ? "#FFFFFF" : null),
     copied,
   };
