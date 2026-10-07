@@ -212,6 +212,12 @@ ${
           .join("\n")}\n`
       : ""
   }${opts.real ? `\n${realSection(opts.real)}\n` : ""}${
+    opts.real?.changedFiles.length
+      ? `\nOTHER FILES THIS PR ADDS OR CHANGES, rendered as they are inside the component (read their initial\nstate and exact labels before choosing what to click):\n${opts.real.changedFiles
+          .map((f) => `--- ${f.path}\n\`\`\`tsx\n${f.content}\n\`\`\``)
+          .join("\n")}\n`
+      : ""
+  }${
     !opts.real && opts.localImports?.length
       ? `\nLOCAL IMPORTS of the changed file (AFTER), to rebuild the pieces the diff does not show (their markup,\nclassNames and styles, CSS modules included — translate module classes to equivalent inline styles):\n${opts.localImports
           .map((f) => `--- ${f.path}\n\`\`\`\n${f.content}\n\`\`\``)

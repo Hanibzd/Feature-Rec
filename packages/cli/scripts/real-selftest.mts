@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { assertNoRetyping, localImportSources, prepareRealComponents, type RevisionReader } from "../src/agent/real.ts";
 import { globalVariables, loadTailwindConfig, themeDeclarations } from "../src/agent/theme.ts";
-import { assertNoCaptions, assertTargetsTheChange } from "../src/agent/index.ts";
+import { assertClicksNewControl, assertNoCaptions, assertTargetsTheChange } from "../src/agent/index.ts";
+import { addsClickHandler } from "../src/agent/real.ts";
 import { withoutComponentsShownInContext } from "../src/feature-rec.ts";
 import { GENERATED_DIR } from "../src/paths.ts";
 
@@ -63,6 +64,7 @@ try {
   ok("next/link rewritten to the render stub", /from "(\.\.\/)+kit\/stubs\/next-link"/.test(copiedAfter));
   ok("npm import the renderer has is kept", copiedAfter.includes(`from "lucide-react"`));
   ok("BEFORE dependencies come from the BEFORE revision", fs.readFileSync(path.join(dir, "before/src/lib/utils.ts"), "utf8").includes("// before"));
+  ok("rendered files the PR changes are passed on, unchanged ones are not", real?.changedFiles.map((f) => f.path).join() === "src/lib/utils.ts");
   ok("app font and background read from the global CSS", real?.appFont === "Inter, sans-serif" && real?.pageBackground === "#fafafa");
 
   const unsupported = (after: string) => {
@@ -208,6 +210,18 @@ ok("target guard rejects a pointer that only visits untouched elements", offTarg
 ok("target guard accepts text from a new file of the PR", !offTarget(`path: [{ frame: 75, to: { text: "Annual" } }], clicks: [78]`, cardBefore, cardAfter));
 ok("target guard accepts an element whose style changed", !offTarget(`focus={[{ from: 50, text: "Get started" }]}`, cardBefore, cardAfter));
 ok("target guard ignores new components and data-focus ids", !offTarget(`path: [{ frame: 60, to: "signin-btn" }]`, "", cardAfter));
+ok("a new onClick counts as a new control", addsClickHandler(`<p>Plan</p>`, `<p>Plan</p>\n<button onClick={() => setOpen(true)}>Open</button>`));
+ok("an unchanged onClick does not", !addsClickHandler(`<button onClick={go}>Go</button>`, `<h2>New title</h2>\n<button onClick={go}>Go</button>`));
+const noClick = (code: string, adds: boolean) => {
+  try {
+    assertClicksNewControl(code, adds);
+    return false;
+  } catch {
+    return true;
+  }
+};
+ok("click guard rejects a new control that is never clicked", noClick(`pointer={{ path: [], clicks: [] }}`, true));
+ok("click guard accepts a click", !noClick(`pointer={{ path: [], clicks: [78] }}`, true));
 ok("caption guard rejects before/after labels", rejects(`<p className="text-xs">After: avatar image with object-cover</p>`));
 ok("caption guard rejects code shown as text", rejects(`<code>{'className={cn("object-cover", className)}'}</code>`));
 ok("caption guard accepts Tailwind before:/after: variants", !rejects(`<span className="after:content-[''] before:absolute" />`));

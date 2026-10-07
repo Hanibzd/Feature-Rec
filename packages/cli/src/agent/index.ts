@@ -8,7 +8,7 @@ import { writeSceneFile } from "../scenes";
 import { callClaude, hasApiKey, type Turn } from "./anthropic";
 import { hasOfflineScene } from "./offline";
 import { buildPrompt } from "./prompt";
-import { assertNoRetyping, localImportSources, prepareRealComponents, type RealComponents, type RevisionReader } from "./real";
+import { addsClickHandler, assertNoRetyping, localImportSources, prepareRealComponents, type RealComponents, type RevisionReader } from "./real";
 import { extractCodeBlock, validateScene } from "./validate";
 
 export type ReplicationSource = "anthropic" | "offline";
@@ -64,6 +64,16 @@ export function assertTargetsTheChange(code: string, before: string, after: stri
   }
 }
 
+/** A PR that adds a control is shown by clicking it, not just by making it appear. */
+export function assertClicksNewControl(code: string, addsControl: boolean): void {
+  if (addsControl && !/\bclicks\s*:\s*\[\s*\d/.test(code)) {
+    throw new Error(
+      "This PR adds a clickable control (a new onClick/onCheckedChange/… handler) but the scene never clicks. " +
+        "Show how it works: move the pointer to the new control and click the element that changes the UI.",
+    );
+  }
+}
+
 /** Generation attempts per scene: the first answer plus one repair with the error fed back. */
 const ATTEMPTS = 2;
 
@@ -76,6 +86,8 @@ type Session = {
   real: RealComponents | null;
   before: string;
   after: string;
+  /** the PR adds a clickable control the scene should click */
+  addsControl: boolean;
   /** all source text the scene may legitimately display (before, after, local imports) */
   sources: string;
 };
@@ -108,8 +120,15 @@ async function generate(session: Session, attempts: number): Promise<void> {
       const code = validateScene(extractCodeBlock(raw));
       if (session.real) assertNoRetyping(code, session.after);
       assertNoCaptions(code, session.sources);
-      assertTargetsTheChange(code, session.before, session.after);
       writeSceneFile(session.id, code);
+      // Storytelling checks: worth a retry, but never worth losing the video over.
+      try {
+        assertTargetsTheChange(code, session.before, session.after);
+        assertClicksNewControl(code, session.addsControl);
+      } catch (err) {
+        if (attempt < attempts) throw err;
+        log.warn(`Scene "${session.id}": ${(err as Error).message.split(".")[0]}; keeping it.`);
+      }
       const typeErrors = typecheckScene(session.id);
       if (typeErrors.length === 0) return;
       if (attempt === attempts) {
@@ -159,7 +178,14 @@ export async function replicate(
       real,
       before: feature.before,
       after: feature.after,
-      sources: [feature.before, feature.after, ...localImports.map((f) => f.content), ...(feature.usages ?? []).map((u) => u.content)].join("\n"),
+      addsControl: real ? real.addsControl : addsClickHandler(feature.before, feature.after),
+      sources: [
+        feature.before,
+        feature.after,
+        ...localImports.map((f) => f.content),
+        ...(feature.usages ?? []).map((u) => u.content),
+        ...(real?.changedFiles ?? []).map((f) => f.content),
+      ].join("\n"),
     };
     sessions.set(feature.id, session);
     try {
@@ -192,7 +218,7 @@ export async function replicate(
 
 /**
  * The final render failed: feed the error back to the scenes it names (all generated scenes
- * when it names none) for one more attempt. Returns the ids that were rewritten.
+ * when it names none), with the same attempts as a first generation. Returns the ids rewritten.
  */
 export async function repairScenes(renderError: string): Promise<string[]> {
   const named = [...sessions.values()].filter((s) => renderError.includes(s.id));
@@ -204,7 +230,7 @@ export async function repairScenes(renderError: string): Promise<string[]> {
       content: `Rendering the video failed:\n${renderError.slice(0, 2000)}\nFix the scene and return the complete corrected file in one tsx block.`,
     });
     try {
-      await generate(session, 1);
+      await generate(session, ATTEMPTS);
       repaired.push(session.id);
     } catch (err) {
       log.warn(`Repair failed for "${session.id}": ${(err as Error).message}`);

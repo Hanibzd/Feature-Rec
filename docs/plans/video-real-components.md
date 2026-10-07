@@ -72,7 +72,10 @@ prompt cache.
   focus lean in at most to 90% of the frame); `PageHint` renders inside flex layouts; cross-fades
   are staggered so two texts never overlap; the default text color follows the page background;
   a scene whose pointer and focus only visit elements the diff leaves untouched is sent back to
-  the model (`assertTargetsTheChange`).
+  the model (`assertTargetsTheChange`), and so is one that never clicks a control the PR adds
+  (`assertClicksNewControl`); both only warn on the last attempt. In real mode the model also
+  reads the other rendered files the PR adds or changes: without them it could not see a new
+  toggle's initial state and clicked the option already selected (4/4 first-time renders after).
 
 ## Open issues
 

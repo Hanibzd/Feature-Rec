@@ -27,7 +27,22 @@ export type RealComponents = {
   pageBackground: string | null;
   /** Repository files copied per revision (the changed file plus its local dependencies). */
   copied: number;
+  /** The PR adds a clickable control somewhere in the rendered files (see addsClickHandler). */
+  addsControl: boolean;
+  /** Other rendered files the PR adds or changes (AFTER), so the scene knows their states and labels. */
+  changedFiles: Array<{ path: string; content: string }>;
 };
+
+const HANDLER_RE = /\bon(Click|Submit|Toggle|CheckedChange|ValueChange|PressedChange|OpenChange)\s*=/;
+
+/**
+ * Whether AFTER has a click-like handler on a line that BEFORE does not have: the PR adds or
+ * rewires a control, so the video should click it to show what it does.
+ */
+export function addsClickHandler(before: string, after: string): boolean {
+  const old = new Set(before.split("\n").map((l) => l.trim()));
+  return after.split("\n").some((l) => HANDLER_RE.test(l) && !old.has(l.trim()));
+}
 
 export class UnsupportedImportError extends Error {}
 
@@ -140,7 +155,7 @@ function cssValue(css: string, selector: string, prop: string): string | null {
  * Copy one revision of the changed file and its local import graph into `outDir`, keeping
  * repository-relative paths so relative imports keep working. Throws UnsupportedImportError.
  */
-function copyRevision(entry: string, revision: Revision, read: RevisionReader, outDir: string): number {
+function copyRevision(entry: string, revision: Revision, read: RevisionReader, outDir: string, sources = new Map<string, string>()): number {
   const readRev = (p: string) => read(revision, p);
   const aliases = aliasRules((p) => read("after", p));
   const resolveLocal = (base: string): string | null => {
@@ -160,6 +175,7 @@ function copyRevision(entry: string, revision: Revision, read: RevisionReader, o
     const source = readRev(file);
     if (source === null) throw new UnsupportedImportError(`${file} is missing at ${revision}`);
     if (DYNAMIC_IMPORT_RE.test(source)) throw new UnsupportedImportError(`${file} uses dynamic import/require`);
+    sources.set(file, source);
 
     const target = path.join(outDir, file);
     const rewrites = new Map<string, string>();
@@ -200,6 +216,18 @@ function copyRevision(entry: string, revision: Revision, read: RevisionReader, o
   return seen.size;
 }
 
+/** Files besides the entry that differ between the copies (new or modified by the PR), size-capped. */
+function changedDependencies(entry: string, before: Map<string, string>, after: Map<string, string>) {
+  const files: Array<{ path: string; content: string }> = [];
+  let budget = 16_000;
+  for (const [p, content] of after) {
+    if (p === entry || before.get(p) === content || content.length > budget || files.length >= 4) continue;
+    files.push({ path: p, content });
+    budget -= content.length;
+  }
+  return files;
+}
+
 /**
  * Prepare real mode for one changed file, or return null (with the reason logged by the
  * caller) when it cannot be rendered untouched. `read` gives access to other repository files;
@@ -232,16 +260,18 @@ export function prepareRealComponents(input: {
   const entryNoExt = file.replace(/\.(tsx|jsx|ts|js)$/, "");
   const lines: string[] = [];
   let copied = 0;
+  const beforeSources = new Map<string, string>();
+  const afterSources = new Map<string, string>();
   try {
     if (before) {
       const line = importLine(before, "Before", `./${id}/before/${entryNoExt}`);
       if (!line) throw new UnsupportedImportError("the BEFORE file has no exported component");
-      copied = copyRevision(file, "before", read, path.join(dir, "before"));
+      copied = copyRevision(file, "before", read, path.join(dir, "before"), beforeSources);
       lines.push(line);
     }
     const line = importLine(after, "After", `./${id}/after/${entryNoExt}`);
     if (!line) throw new UnsupportedImportError("the AFTER file has no exported component");
-    copied = Math.max(copied, copyRevision(file, "after", read, path.join(dir, "after")));
+    copied = Math.max(copied, copyRevision(file, "after", read, path.join(dir, "after"), afterSources));
     lines.push(line);
   } catch (err) {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -258,6 +288,8 @@ export function prepareRealComponents(input: {
     appFont: appFontFamily(globalsCss),
     pageBackground: cssValue(globalsCss, "body", "background(?:-color)?") ?? (globalsCss ? "#FFFFFF" : null),
     copied,
+    addsControl: addsClickHandler([...beforeSources.values()].join("\n"), [...afterSources.values()].join("\n")),
+    changedFiles: changedDependencies(file, beforeSources, afterSources),
   };
 }
 

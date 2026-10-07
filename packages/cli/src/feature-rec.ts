@@ -198,7 +198,7 @@ export async function renderFeatureRecVideo(input: {
     }
     const repaired = await repairScenes(error.stack ?? error.message);
     if (repaired.length > 0) {
-      log.warn(`Render failed; repaired ${repaired.join(", ")} and rendering again.`);
+      log.warn(`Render failed (${error.message.split("\n")[0].slice(0, 200)}); repaired ${repaired.join(", ")} and rendering again.`);
       regenerateRegistry();
       try {
         return await renderDemo({ strictClicks: true });
