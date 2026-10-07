@@ -71,12 +71,18 @@ try {
     await docker(["stop", "--time", "10", name]);
   }
 
+  // The packaged admin bundle must reach PostgreSQL with only DATABASE_URL.
+  const status = JSON.parse((await docker(["run", "--rm", ...network, "--env", `DATABASE_URL=${dockerUrl}`,
+    "--entrypoint", "node", image, "dist/admin.js", "migration-status", "--environment", "image-selftest"])).stdout) as { migrations: Array<{ status: string }> };
+  assert.ok(status.migrations.length > 0);
+  assert.ok(status.migrations.every((migration) => migration.status === "executed"));
+
   // Partial hosted OAuth configuration must fail startup.
   const partial = await start([clientSecret]);
   await exited(partial);
   const logs = await docker(["logs", partial]);
   assert.ok(!(logs.stdout + logs.stderr).includes("Server listening at"));
-  console.log("Service image selftest passed: admin help, health with and without hosted OAuth, and partial OAuth configuration refused.");
+  console.log("Service image selftest passed: admin help, health with and without hosted OAuth, admin migration status, and partial OAuth configuration refused.");
 } catch (error) {
   // Capture evidence before cleanup without masking the test failure.
   for (const name of containers) {
