@@ -222,9 +222,7 @@ persisted locally.
 Only explicit loopback HTTP base URLs are accepted in development/tests; production requires HTTPS.
 Credentials, query strings, and fragments are rejected. The audience is the normalized base URL,
 with no independent audience override. Discovery/JWKS access is lazy until the first OIDC request,
-so a fresh-database `/health` smoke does not call GitHub or Slack. No runtime path accepts
-`FEATURE_REC_RUNNER_TOKEN`, `SLACK_BOT_TOKEN`, `FEATURE_REC_GITHUB_TOKEN`, or a `GITHUB_TOKEN`
-fallback; these variables are unused if they are still set.
+so a fresh-database `/health` smoke does not call GitHub or Slack.
 
 ## Railway deployment
 
@@ -332,7 +330,7 @@ acquiring locks during claim and staging. Consumption checks availability and
 pairing under lock, including cancellation or consumption by another caller.
 Pending-ID provisioning copies the validated envelope unchanged into active storage.
 Manual-token provisioning still encrypts raw input; see the
-[B2 design](plans/feature-rec-oidc-multitenancy-plan.md#pr-b2--hosted-slack-oauth-installation).
+[hosted OAuth design](plans/feature-rec-oidc-multitenancy-plan.md#pr-b2--hosted-slack-oauth-installation).
 
 The status operation returns only the installation ID, verified identity, dates,
 lifecycle status and consumed result IDs. Pending records report no expiry. It
@@ -388,7 +386,8 @@ Startup decrypt-checks active and pending tokens after checking that verifier. A
 or missing verifier prevents startup. A corrupt active token produces event
 `SLACK_TOKEN_DECRYPTION_FAILED` with tenant/workspace IDs; a corrupt pending token produces
 `SLACK_PENDING_TOKEN_DECRYPTION_FAILED` with installation/workspace IDs. These individual failures
-allow startup for other tenants but appear as readiness-validation issues. Repair the affected
+allow startup for other tenants but appear as issues in the
+[`validate-integrity`](#administration-commands) report. Repair the affected
 active credentials by
 [provisioning the tenant again](tenant-onboarding.md#change-or-remove-a-tenant), or cancel an
 unusable pending installation with `cancel-slack-installation` and start a fresh
@@ -408,25 +407,26 @@ railway ssh -- node dist/admin.js migration-status --environment production
 ```
 
 ```bash
-railway ssh -- node dist/admin.js validate-contract-readiness --environment production
+railway ssh -- node dist/admin.js validate-integrity --environment production
 ```
 
 | Command | Purpose |
 | --- | --- |
 | `migration-status` | List every registered migration with its execution time. |
 | `migrate-to <migration> --confirm [--expect-current <migration>]` | Migrate to the named migration. A downgrade also requires `--expect-current`, `--service-stopped` and `--traffic-paused`. The current-migration check and the migration share a lock with startup migrations; the command exits nonzero on any failure. |
-| `validate-contract-readiness [--require-future-cycle-keys]` | Read-only integrity report. It flags cycles without tenant/repository identity, colliding cycle identities, enabled tenants without exactly one workspace and one installation, channel settings without a workspace, key-verifier problems, and active or pending tokens that cannot be decrypted. With the flag, it also flags cycles whose key is not in the canonical format. It exits nonzero when it reports an issue. |
+| `validate-integrity` | Read-only integrity report for what the schema cannot enforce. It flags enabled tenants without exactly one Slack workspace and one GitHub installation, a missing or mismatched encryption-key verifier, and active or pending tokens that cannot be decrypted. Run it after a restore or a key change. It exits nonzero when it reports an issue. |
 | `provision-tenant` | Pair and activate a tenant; see [Provision the tenant](tenant-onboarding.md#provision-the-tenant). |
 | `slack-installation-status --slack-installation-id <uuid>` | Show a sanitized pending-installation record; exits nonzero if it does not exist. |
 | `cancel-slack-installation --confirm --slack-installation-id <uuid>` | Cancel an unconsumed installation and clear its staged secrets. |
+| `disable-tenant --confirm --tenant-id <uuid>` | Disable an enabled tenant without deleting anything; see [Change or remove a tenant](tenant-onboarding.md#change-or-remove-a-tenant). It exits nonzero if the tenant does not exist or is already disabled. |
 
-`migration-status`, `migrate-to`, `slack-installation-status` and `cancel-slack-installation` need
-only `DATABASE_URL`, so they keep working when integration configuration is broken.
-`validate-contract-readiness` and `provision-tenant` also read the runtime configuration, including
+`migration-status`, `migrate-to`, `slack-installation-status`, `cancel-slack-installation` and
+`disable-tenant` need only `DATABASE_URL`, so they keep working when integration configuration is
+broken.
+`validate-integrity` and `provision-tenant` also read the runtime configuration, including
 the encryption key. The commands print no secrets.
 
-For schema downgrades, stop the service first and run the retained admin artifact from a separate
-maintenance process; see [Rollback runbooks](#rollback-runbooks). Do not downgrade from a live
+For a schema downgrade, follow [Schema downgrade](#schema-downgrade). Do not downgrade from a live
 service shell.
 
 ## Backup, rollback, and migration
@@ -447,231 +447,42 @@ release is a separate deploy with its own gate. The registered migrations are:
 | `0005_explicit_channel_routing` | Explicit per-workspace routes in `team_channel_routes` |
 | `0006_drop_legacy_bot_channels` | Drop the membership snapshot |
 | `0007_mention_modes` | Mention modes and audiences; every channel follows approvers |
-| `0008_multitenant_expand` | Tenants, Slack workspaces, GitHub installations, key verifier and nullable cycle identity (deploy A) |
-| `0009_slack_oauth_installations` | Hosted OAuth sessions and pending installations (deploy B2) |
-| `0010_multitenant_enforce` | Required cycle identity and the cascading `channel_settings_team_id_fkey` (deploy C) |
-| `0011_multitenant_contract` | Drop `team_channel_routes` and the legacy cycle columns (deploy D) |
+| `0008_multitenant_expand` | Tenants, Slack workspaces, GitHub installations, key verifier and nullable cycle identity |
+| `0009_slack_oauth_installations` | Hosted OAuth sessions and pending installations |
+| `0010_multitenant_enforce` | Required cycle identity and the cascading `channel_settings_team_id_fkey` |
+| `0011_multitenant_contract` | Drop `team_channel_routes` and the legacy cycle columns |
 
-Deploy D's `0011_multitenant_contract` drops `team_channel_routes` and the legacy `review_cycles`
-columns `owner`, `repo`, `config_hash` and `config_json`. Its `down()` recreates only the empty
-table and nullable columns; it never restores historical values, which deploy C neither reads nor
-writes. Pre-cutover binaries are therefore no longer rollback-compatible: once the contract has
-run, `0008`'s `down()` refuses whenever any cycle exists, and recovering deploy A requires the
-pre-cutover backup. The earlier waves are summarized in [Release history](#release-history).
+No supported release runs on a schema older than `0011_multitenant_contract`, so do not migrate
+below it. Its `down()` cannot restore the dropped legacy values; recovering a state from before it
+requires a database backup.
 
-Kysely rejects a recorded migration absent from an older artifact. Always migrate down using the
-newer artifact before starting the older service; do not hand-edit migration records. Roll back one
-wave at a time, newest first. The newest artifact's admin command can run every older down step, so
-artifact D may perform each downgrade below. Never renumber an applied migration.
+### Schema downgrade
 
-### Rollback runbooks
-
-**D-to-C rollback:**
-
-1. Pause runner/Slack writes, drain in-flight requests, and verify a fresh database backup plus the
-   pinned C artifact. Disable automatic deploys and stop all D service instances through the
-   platform controls. A process kill alone is insufficient with auto-restart.
-2. From a separate maintenance process, use D's compiled admin artifact against the private
-   database, inspect `migration-status`, and run:
-
-   ```bash
-   node dist/admin.js migrate-to 0010_multitenant_enforce --environment production \
-     --expect-current 0011_multitenant_contract --service-stopped --traffic-paused --confirm
-   ```
-
-   `0011`'s `down()` recreates an empty `team_channel_routes` table and empty, nullable legacy
-   `review_cycles` columns. Enforcement constraints, tenant data, OAuth sessions and pending
-   installations remain.
-3. Verify migration status before starting only the pinned C image. Check `/health` and an existing
-   review flow, then resume traffic. Do not restart D, which would reapply `0011`, or restore
-   autodeploys until their target matches the chosen schema.
-
-To continue to B2 without starting C, follow C-to-B2 next with D's or C's artifact. Its
-reconciliation step repopulates the recreated, empty `team_channel_routes` table from
-`slack_workspaces`.
-
-**C-to-B2 rollback:**
-
-1. Pause runner/Slack writes, drain in-flight requests, and verify a fresh database backup plus the
-   pinned B2 artifact. Disable automatic deploys and stop all C service instances through the
-   platform controls. A process kill alone is insufficient with auto-restart.
-2. From a separate maintenance process, use C's (or D's) compiled admin artifact against the private
-   database, inspect `migration-status`, and run:
-
-   ```bash
-   node dist/admin.js migrate-to 0009_slack_oauth_installations --environment production \
-     --expect-current 0010_multitenant_enforce --service-stopped --traffic-paused --confirm
-   ```
-
-   `0010`'s `down()` drops the channel-settings foreign key and both review-cycle `NOT NULL`s
-   without touching data. OAuth sessions and pending installations remain.
-3. Deploy C stops maintaining `team_channel_routes` (after D-to-C it is recreated empty), but B2
-   reads it as a provisioning fallback, resumes dual-writing it, and reports divergence during
-   readiness validation. Before starting B2, reconcile the frozen table with `slack_workspaces` in
-   one transaction:
-
-   ```sql
-   BEGIN;
-   DELETE FROM team_channel_routes route
-   WHERE NOT EXISTS (
-     SELECT 1 FROM slack_workspaces workspace
-     WHERE workspace.team_id = route.team_id AND workspace.selected_channel_id IS NOT NULL
-   );
-   INSERT INTO team_channel_routes (team_id, selected_channel_id)
-   SELECT team_id, selected_channel_id FROM slack_workspaces WHERE selected_channel_id IS NOT NULL
-   ON CONFLICT (team_id) DO UPDATE SET selected_channel_id = excluded.selected_channel_id;
-   COMMIT;
-   ```
-
-   Then run B2's `validate-contract-readiness` and require a clean report.
-4. Verify migration status before starting only the pinned B2 image. Check `/health` and an existing
-   review flow, then resume traffic. Do not restart C, which would reapply `0010`, or restore
-   autodeploys until their target matches the chosen schema.
-
-A C-to-B2 rollback drops the cascade before B2 starts, so B2's provisioning command is safe again
-afterwards.
-
-**B2-to-B rollback:**
-
-1. Stop new installations, pause runner/Slack writes, drain in-flight requests, and verify a fresh
-   database backup plus the pinned B artifact. Disable automatic deploys and stop all B2 service
-   instances through the platform controls. A process kill alone is insufficient with auto-restart.
-2. Explicitly cancel unconsumed installations before downgrading. The `0009` guard rejects every
-   `awaiting_callback`, `exchanging` or `pending` row, including expired session rows; cancellation
-   or session cleanup must transition them first. From the maintenance process, identify
-   unconsumed IDs with:
-
-   ```sql
-   SELECT id, status, team_id FROM slack_oauth_installations
-   WHERE status IN ('awaiting_callback', 'exchanging', 'pending');
-   ```
-
-   For each ID, use the compiled operator command:
-
-   ```bash
-   node dist/admin.js cancel-slack-installation --environment production \
-     --slack-installation-id <id> --confirm
-   ```
-
-   Rerun the query and verify it returns no rows before migrating down. A sanitized
-   `expired` status alone does not prove cleanup changed the stored lifecycle; the
-   migration guard checks the stored value. Cancellation also works without the
-   encryption key or provider credentials.
-3. From a separate maintenance process, use B2's (or a newer) compiled admin artifact against the
-   private database, inspect `migration-status`, and run:
-
-   ```bash
-   node dist/admin.js migrate-to 0008_multitenant_expand --environment production \
-     --expect-current 0009_slack_oauth_installations --service-stopped --traffic-paused --confirm
-   ```
-
-   The flags acknowledge actual operator actions; they do not stop the service. The down migration
-   locks the temporary table while checking its lifecycle guard, then drops only that table. Active
-   tenants, Slack workspaces/tokens, GitHub installations and the key verifier remain intact.
-4. Verify migration status before starting only the pinned B image. Check `/health` and an existing
-   review flow, then resume traffic. Do not restart B2, which would reapply `0009`, or restore
-   autodeploys until their target matches the chosen schema.
-
-**Pre-expansion rollback:**
-
-To roll the database back to the pre-expansion schema, first complete D-to-C, C-to-B2 and B2-to-B
-for each applied wave, then use the retained B artifact at `0008`. This only works while every cycle
-still has its legacy repository names. `0008`'s `down()` refuses once deploy C has written a cycle,
-and after D's contract it refuses whenever any cycle exists; restore the pre-cutover backup instead.
+Kysely rejects a recorded migration that an older release does not register. To roll back a release
+that added a migration, migrate down with the newer release's admin command before starting the
+older release. Never hand-edit migration records or renumber an applied migration.
 
 1. Pause runner and Slack writes, drain active requests, and verify a fresh database backup and the
-   retained older release. Disable automatic deploys and stop all current service instances using
-   the platform's deployment controls; killing a process is not enough with an always-restart policy.
-2. From a **separate maintenance process**, run the retained newer admin artifact against the private
-   database (for example via a private `railway connect postgres --tunnel-only` connection). Do not
-   use `railway ssh` inside the still-running service for a schema downgrade. Check migration status.
-3. Run `node dist/admin.js migrate-to 0007_mention_modes --environment production --expect-current
-   0008_multitenant_expand --service-stopped --traffic-paused --confirm`. These flags acknowledge
-   actual operator actions; they do not stop Railway for you. The expected-current check and migration
-   are serialized with startup migrations, but a later service restart would reapply `0008`.
-4. Verify migration status, start only the pinned older image, check `/health` and an existing review
-   flow, then resume traffic. Restore autodeploys only once their target is safe for the chosen schema.
+   older release to restore. Disable automatic deploys and stop all service instances through the
+   platform's deployment controls; killing a process is not enough with an always-restart policy.
+2. From a **separate maintenance process**, run the newer release's admin command against the
+   private database, for example through a private `railway connect postgres --tunnel-only`
+   connection. Do not use `railway ssh` inside a still-running service. Check `migration-status`.
+3. Migrate down:
 
-Do not expose PostgreSQL publicly or hand-edit Kysely's migration records. Downgrading `0008` removes
-tenant integrations and the key verifier; retain the backup for recovery.
+   ```bash
+   node dist/admin.js migrate-to <target-migration> --environment production \
+     --expect-current <current-migration> --service-stopped --traffic-paused --confirm
+   ```
 
-### Release history
+   The flags acknowledge actual operator actions; they do not stop Railway for you. The
+   expected-current check and the migration are serialized with startup migrations, but a later
+   start of the newer release would apply its migrations again.
+4. Verify migration status, start only the older release, check `/health` and an existing review
+   flow, then resume traffic. Restore automatic deploys only once their target is safe for the
+   chosen schema.
 
-The OIDC and multitenancy rollout shipped as separate deploys, each with its own gate; the full
-record is the
-[OIDC and multitenancy plan](plans/feature-rec-oidc-multitenancy-plan.md#migration-and-release-plan).
-
-| Deploy | Migration | Change |
-| --- | --- | --- |
-| A | `0008_multitenant_expand` | Expand the schema, add the compiled admin command and compatibility writes |
-| B | none | GitHub Actions OIDC and the tenant-scoped runtime, with legacy writes retained |
-| B2 | `0009_slack_oauth_installations` | Hosted Slack OAuth installation |
-| C | `0010_multitenant_enforce` | Enforce identity and stop every legacy read and write |
-| D | `0011_multitenant_contract` | Drop the legacy table and columns |
-
-Migration `0008_multitenant_expand` adds only nullable/new schema and relaxes the legacy repository
-name columns. The retained A/B artifacts register only through `0008`; B2 registers through the
-additive `0009_slack_oauth_installations` and retains all B compatibility behavior, including
-`team_channel_routes` and its dual writes. B/B2 read the workspace selection as routing authority.
-The `0008` down migration refuses to proceed if any cycle lacks the legacy `owner`/`repo` values
-needed by deploy A. Check the deployed migration status before choosing a rollback target.
-
-Deploy C registers `0010_multitenant_enforce`. It refuses to run while any review cycle has a null
-`tenant_id`/`repository_id` or any `channel_settings` row references an absent Slack workspace, then
-sets both cycle columns `NOT NULL` and adds the named `channel_settings_team_id_fkey` foreign key
-with `ON DELETE CASCADE`. Its `down()` drops that constraint and both `NOT NULL`s without touching
-data, so C-to-B2 stays reversible. Deploy C also stops every legacy read/write: no `owner`/`repo`
-values are written to new cycles and no code path touches `team_channel_routes`. Because C-written
-cycles have null repository names, `0008`'s `down()` (and therefore deploy A) becomes unreachable
-once C has served traffic, except by restoring the pre-cutover backup.
-
-C's release gate was B2's live installation in two real workspaces passing the two-tenant smoke,
-a clean first observation window, a clean `validate-contract-readiness` report, and a fresh backup;
-C passed it. B2's serving instances could keep running while C migrated because B2 already wrote
-complete cycle identity and installed-workspace settings. B2's admin command is not safe against
-`0010` or later: `provision-tenant --replace-pairing` deletes and re-creates the workspace row, and
-the cascade then deletes that team's channel settings, reverting approver restrictions to
-unrestricted approval. Provisioning with the B2 artifact was therefore paused before C was merged.
-Provision only with C's or a later admin command, which re-pairs the row in place.
-
-The one-time singleton backfill (`backfill-multitenancy`) and the deploy-A rollback preparation
-(`prepare-rollback-to-a`) were completed before the deploy-B cutover and exist only in the retained
-A/B artifacts; the deploy-C and later artifacts omit them. Contract-readiness validation no longer
-compares legacy and workspace selected-channel values because deploy C stopped the dual write.
-
-B-to-A required no migration down and was allowed only for a validated singleton via the retained
-B artifact's `prepare-rollback-to-a` command; the deploy-C artifact removes that command, and any
-cycle written by deploy C lacks the legacy repository names deploy A needs. After C has served
-traffic, recovering to A means restoring the pre-cutover backup.
-
-The following checklist governed the completed deploy-B cutover; it is retained as the record of
-that procedure. The backfill and route-comparison steps require the retained A/B artifacts — the
-deploy-C and later artifacts no longer carry them.
-
-For an existing singleton installation, retain the A artifact and verify a current backup/restore
-drill before merging the cutover release. Inventory every consuming repository, recording:
-
-- Its current action commit, replacing moving `@main` references with a pinned pre-cutover revision.
-- The prepared immutable OIDC action revision and `permissions: id-token: write` on its workflow job.
-- Its `api-url` value, matching the backend's explicit public `FEATURE_REC_BASE_URL` audience.
-- Removal of its legacy runner-secret reference when switching to the OIDC action.
-
-Set the encryption key and issuer, pause new workflows, drain or cancel all old-token runs, and rerun
-the retained A backfill with `--rebuild-cycle-keys --traffic-paused`. Require a clean
-`validate-contract-readiness --require-future-cycle-keys` report, then deploy B with no mixed A/B
-request handling. Switch the inventoried workflows to their pinned OIDC revision, provision the
-second test tenant, run the two-tenant [smoke checks](#smoke-checks), and resume traffic. During
-observation, compare legacy/new selected-channel values, rerun readiness validation, and inspect
-tenant-scoped decrypt, OIDC/JWKS, and installation-authorization failures. The original B artifact
-stops at `0008`; B2 adds only OAuth storage `0009`. `0010_multitenant_enforce` ships in deploy C,
-after this cutover's observation window is clean.
-
-Migration `0006_drop_legacy_bot_channels` permanently removes the obsolete membership snapshot after
-explicit routing has completed its observation window. Its runbook required verifying that every
-expected workspace had a `team_channel_routes` row and retaining a database snapshot or
-`bot_channels` export before deploying it. After it runs, rollback is limited to explicit-route
-service versions; queue-based binaries are no longer supported. Restoring membership history
-requires the pre-cleanup snapshot, not a down migration.
+Do not expose PostgreSQL publicly.
 
 ## Moving providers
 
@@ -694,14 +505,11 @@ TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres \
   pnpm --filter @feature-rec/service exec tsx scripts/service-image-selftest.mts feature-rec-service:local
 ```
 
-The harness rolls the image's schema back from `0011` through D-to-C, C-to-B2 (pending
-installations survive) and B2-to-B (after cancellation), then forward again. Optionally set
-`PREVIOUS_SERVICE_IMAGE` to a locally retained C image to verify that it rejects schema `0011`
-and starts only after downgrade to `0010`. The harness
-uses only the temporary database for migrations, fixtures and rollback, then
-removes its containers and database. On failure, it collects container stdout/stderr
-before removal, redacts known test credentials, and preserves the original test
-error if logs are unavailable. It never loads `.env` or production credentials.
+The harness checks that the compiled admin command prints its help, that the service migrates the
+temporary database and serves `/health` with hosted OAuth disabled and configured, and that the
+admin command reads `migration-status` with only `DATABASE_URL`. It uses fixture values only and never loads `.env` or production
+credentials. On failure, it prints the container logs before it removes the containers and the
+database.
 
 The following checks exercise real integrations in staging.
 

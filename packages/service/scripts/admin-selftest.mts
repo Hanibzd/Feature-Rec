@@ -13,8 +13,9 @@ import { Kysely, PostgresDialect, sql } from "kysely";
 import { Migrator } from "kysely/migration";
 import { Client, Pool } from "pg";
 import {
+  disableTenant,
   provisionTenant,
-  validateMultitenancy,
+  validateIntegrity,
   type AdminProviders,
 } from "../src/admin-operations";
 import { decryptSlackToken, encryptSlackToken } from "../src/slack-token-crypto";
@@ -140,11 +141,29 @@ try {
   }
   await runAdmin(["migrate-to", "0011_multitenant_contract", "--confirm", "--expect-current", "0007_mention_modes"]);
   assert.equal(JSON.parse((await runAdmin(["migration-status"])).stdout).migrations.at(-1).name, "0011_multitenant_contract");
-  await assert.rejects(runAdmin(["validate-contract-readiness"]), /canonical base64/);
+  await assert.rejects(runAdmin(["validate-integrity"]), /canonical base64/);
+
+  // disable-tenant needs only the database and succeeds only for an existing, enabled tenant.
+  const tenantEnabled = async (id: string) =>
+    (await db.selectFrom("tenants").select("enabled").where("id", "=", id).executeTakeFirst())?.enabled;
+  const disableId = crypto.randomUUID();
+  await db.insertInto("tenants").values({ id: disableId, enabled: true }).execute();
+  await assert.rejects(runAdmin(["disable-tenant", "--tenant-id", disableId]), /requires --confirm/);
+  await assert.rejects(runAdmin(["disable-tenant", "--confirm"]), /--tenant-id is required/);
+  await assert.rejects(runAdmin(["disable-tenant", "--confirm", "--tenant-id", "not-a-uuid"]), /Tenant ID must be a UUID/);
+  const unknownId = crypto.randomUUID();
+  await assert.rejects(runAdmin(["disable-tenant", "--confirm", "--tenant-id", unknownId]), new RegExp(`Tenant ${unknownId} does not exist`));
+  assert.equal(await tenantEnabled(disableId), true);
+  const disabledCli = JSON.parse((await runAdmin(["disable-tenant", "--confirm", "--tenant-id", disableId.toUpperCase()])).stdout);
+  assert.deepEqual(disabledCli, { environment: "selftest", tenantId: disableId, enabled: false });
+  assert.equal(await tenantEnabled(disableId), false);
+  await assert.rejects(runAdmin(["disable-tenant", "--confirm", "--tenant-id", disableId]), new RegExp(`Tenant ${disableId} is already disabled`));
+  assert.equal(await tenantEnabled(disableId), false);
+  await db.deleteFrom("tenants").where("id", "=", disableId).execute();
 
   assert.deepEqual(await inspectSlackTokenEncryption(db, null), { keyError: null, invalidPendingInstallations: [], invalidWorkspaces: [] });
   for (const selectedChannelId of ["", " ", "CUNKNOWN"]) {
-    await assert.rejects(provisionTenant({ db, providers, slackBotToken: "xoxb-new", encryptionKey: key, installationId: "502", repository: { owner: "Beta", repo: "Three" }, selectedChannelId }), /channel ID must not be empty|not a member/);
+    await assert.rejects(provisionTenant({ db, providers, slackBotToken: "xoxb-new", encryptionKey: key, installationId: "502", checkRepository: { owner: "Beta", repo: "Three" }, selectedChannelId }), /channel ID must not be empty|not a member/);
   }
   // Rejected provisioning writes nothing, including the encryption-key verifier.
   assert.equal(await db.selectFrom("slack_token_encryption_key").selectAll().executeTakeFirst(), undefined);
@@ -155,21 +174,21 @@ try {
     slackBotToken: "xoxb-admin",
     encryptionKey: key,
     installationId: "501",
-    repository: { owner: "Acme", repo: "One" },
+    checkRepository: { owner: "Acme", repo: "One" },
     tenantId,
     selectedChannelId: "CADMIN",
   });
   assert.equal(applied.tenantId, tenantId);
-  assert.equal(applied.repositoryId, "101");
+  assert.equal(applied.checkedRepositoryId, "101");
   assert.deepEqual(await inspectSlackTokenEncryption(db, key), { keyError: null, invalidPendingInstallations: [], invalidWorkspaces: [] });
   assert.match((await inspectSlackTokenEncryption(db, Buffer.alloc(32, 10))).keyError!, /does not match/);
   assert.match((await inspectSlackTokenEncryption(db, null)).keyError!, /ENCRYPTION_KEY is required/);
   const savedVerifier = await db.selectFrom("slack_token_encryption_key").selectAll().executeTakeFirstOrThrow();
   await db.deleteFrom("slack_token_encryption_key").execute();
   assert.match((await inspectSlackTokenEncryption(db, key)).keyError!, /verifier is missing/);
-  await assert.rejects(provisionTenant({ db, providers, slackBotToken: "xoxb-new", encryptionKey: key, installationId: "502", repository: { owner: "Beta", repo: "Three" } }), /verifier is missing/);
+  await assert.rejects(provisionTenant({ db, providers, slackBotToken: "xoxb-new", encryptionKey: key, installationId: "502", checkRepository: { owner: "Beta", repo: "Three" } }), /verifier is missing/);
   await db.insertInto("slack_token_encryption_key").values(savedVerifier).execute();
-  await assert.rejects(provisionTenant({ db, providers, slackBotToken: "xoxb-new", encryptionKey: Buffer.alloc(32, 10), installationId: "502", repository: { owner: "Beta", repo: "Three" } }), /does not match/);
+  await assert.rejects(provisionTenant({ db, providers, slackBotToken: "xoxb-new", encryptionKey: Buffer.alloc(32, 10), installationId: "502", checkRepository: { owner: "Beta", repo: "Three" } }), /does not match/);
   assert.equal(await db.selectFrom("slack_workspaces").selectAll().where("team_id", "=", "TNEW").executeTakeFirst(), undefined);
   const workspace = await db
     .selectFrom("slack_workspaces")
@@ -186,36 +205,53 @@ try {
     await db.selectFrom("tenants").select("enabled").where("id", "=", tenantId).executeTakeFirstOrThrow().then((row) => row.enabled),
     true,
   );
-  // Cycles written by the deploy-C runtime carry canonical multitenant keys and
-  // no repository names; the contract-readiness validator accepts them.
-  await db.insertInto("review_cycles").values([
-    {
-      id: "cycle-one", cycle_key: `${tenantId}/101#1:abcdefg`, tenant_id: tenantId, repository_id: "101",
-      pr_number: 1, pr_author: "a", pr_title: "one", head_sha: "abcdefg",
-      status: "failed", attempt_id: "attempt-one", created_at: "2026-01-01", updated_at: "2026-01-01",
-    },
-    {
-      id: "cycle-two", cycle_key: `${tenantId}/102#2:hijklmn`, tenant_id: tenantId, repository_id: "102",
-      pr_number: 2, pr_author: "b", pr_title: "two", head_sha: "hijklmn",
-      status: "accepted", attempt_id: "attempt-two", created_at: "2026-01-01", updated_at: "2026-01-01",
-    },
-  ]).execute();
-  assert.equal(
-    (await validateMultitenancy({ db, encryptionKey: key, requireFutureCycleKeys: true })).ok,
-    true,
-  );
-
-  // A colliding identity with a stray key is reported, never silently resolved.
-  await db.insertInto("review_cycles").values({
-    id: "cycle-collision", cycle_key: "legacy-collision#1:abcdefg", tenant_id: tenantId, repository_id: "101",
-    pr_number: 1, pr_author: "c", pr_title: "collision", head_sha: "abcdefg",
-    status: "failed", attempt_id: "attempt-collision", created_at: "2026-01-01", updated_at: "2026-01-01",
+  // Disabling waits for the provisioning lock, changes only the flag, and
+  // provisioning the tenant again enables it.
+  await db.insertInto("channel_settings").values({
+    team_id: "TADMIN", channel_id: "CADMIN", mention_mode: "approvers",
+    mention_audience: null, approvers: '["UAPPROVER"]', updated_by: "UAPPROVER", updated_at: new Date().toISOString(),
   }).execute();
-  const collision = await validateMultitenancy({ db, encryptionKey: key, requireFutureCycleKeys: true });
-  assert.equal(collision.ok, false);
-  assert.ok(collision.issues.some((issue) => issue.includes("future cycle key collision")));
-  assert.ok(collision.issues.some((issue) => issue.includes("has not been switched to its multitenant cycle key")));
-  await db.deleteFrom("review_cycles").where("id", "=", "cycle-collision").execute();
+  const integrations = async () => ({
+    workspace: await db.selectFrom("slack_workspaces").selectAll().where("tenant_id", "=", tenantId).executeTakeFirstOrThrow(),
+    installation: await db.selectFrom("github_installations").selectAll().where("tenant_id", "=", tenantId).executeTakeFirstOrThrow(),
+    settings: await db.selectFrom("channel_settings").selectAll().where("team_id", "=", "TADMIN").execute(),
+  });
+  const beforeDisable = await integrations();
+  const disableBlocker = new Client({ connectionString: testUrl });
+  await disableBlocker.connect();
+  try {
+    await disableBlocker.query("select pg_advisory_lock(hashtextextended('tenant-integration-provisioning', 0))");
+    const disabling = disableTenant(db, tenantId);
+    try {
+      await waitForBlockedQueries(1);
+      assert.equal(await tenantEnabled(tenantId), true);
+    } finally {
+      await disableBlocker.query("select pg_advisory_unlock(hashtextextended('tenant-integration-provisioning', 0))");
+    }
+    assert.deepEqual(await disabling, { tenantId, enabled: false });
+  } finally {
+    await disableBlocker.end();
+  }
+  assert.equal(await tenantEnabled(tenantId), false);
+  assert.deepEqual(await integrations(), beforeDisable);
+  await assert.rejects(disableTenant(db, tenantId), /is already disabled/);
+  await provisionTenant({
+    db, providers: adminRepositoryProviders, slackBotToken: "xoxb-admin", encryptionKey: key,
+    installationId: "501", checkRepository: { owner: "Acme", repo: "One" }, tenantId,
+  });
+  assert.equal(await tenantEnabled(tenantId), true);
+  assert.deepEqual((await integrations()).settings, beforeDisable.settings);
+  await db.deleteFrom("channel_settings").where("team_id", "=", "TADMIN").execute();
+  assert.equal((await validateIntegrity({ db, encryptionKey: key })).ok, true);
+  // An enabled tenant must keep exactly one workspace and one installation.
+  const unpairedTenantId = crypto.randomUUID();
+  await db.insertInto("tenants").values({ id: unpairedTenantId, enabled: true }).execute();
+  const unpaired = await validateIntegrity({ db, encryptionKey: key });
+  assert.equal(unpaired.ok, false);
+  assert.ok(unpaired.issues.includes(`enabled tenant ${unpairedTenantId} has 0 Slack workspace(s) and 0 GitHub installation(s)`));
+  await db.updateTable("tenants").set({ enabled: false }).where("id", "=", unpairedTenantId).execute();
+  assert.equal((await validateIntegrity({ db, encryptionKey: key })).ok, true);
+  await db.deleteFrom("tenants").where("id", "=", unpairedTenantId).execute();
 
   const wrongAad = encryptSlackToken({ token: "xoxb-admin", teamId: "TOTHER", key });
   await db
@@ -223,7 +259,7 @@ try {
     .set({ bot_token_ciphertext: wrongAad })
     .where("team_id", "=", "TADMIN")
     .execute();
-  const invalidCiphertext = await validateMultitenancy({ db, encryptionKey: key });
+  const invalidCiphertext = await validateIntegrity({ db, encryptionKey: key });
   assert.equal(invalidCiphertext.ok, false);
   assert.ok(invalidCiphertext.issues.some((issue) => issue.includes("team-bound AAD")));
   // An independently verified key lets even the sole corrupted token remain tenant-local.
@@ -237,7 +273,7 @@ try {
   const pendingWrongAad = encryptSlackToken({ token: "xoxb-pending", teamId: "TOTHER", key });
   await db.updateTable("slack_oauth_installations").set({ bot_token_ciphertext: pendingWrongAad })
     .where("id", "=", pendingSession.id).execute();
-  const pendingValidation = await validateMultitenancy({ db, encryptionKey: key });
+  const pendingValidation = await validateIntegrity({ db, encryptionKey: key });
   assert.ok(pendingValidation.issues.some((issue) => issue.includes(pendingSession.id) && issue.includes("team-bound AAD")));
   assert.ok(!JSON.stringify(pendingValidation).includes(pendingWrongAad));
   const portProbe = createServer();
@@ -304,7 +340,7 @@ try {
         slackBotToken: "xoxb-admin",
         encryptionKey: key,
         installationId: "501",
-        repository: { owner: "Acme", repo: "One" },
+        checkRepository: { owner: "Acme", repo: "One" },
         tenantId,
       }),
     ]);
@@ -332,7 +368,7 @@ try {
     slackBotToken: "xoxb-new",
     encryptionKey: key,
     installationId: "502",
-    repository: { owner: "Other", repo: "Repo" },
+    checkRepository: { owner: "Other", repo: "Repo" },
     tenantId: secondTenantId,
     selectedChannelId: "CNEW",
   });
@@ -353,7 +389,7 @@ try {
     slackBotToken: "xoxb-new",
     encryptionKey: key,
     installationId: "503",
-    repository: { owner: "Other", repo: "Repo" },
+    checkRepository: { owner: "Other", repo: "Repo" },
     tenantId: secondTenantId,
     selectedChannelId: "CNEW",
   });
@@ -370,7 +406,7 @@ try {
         slackBotToken: "xoxb-new",
         encryptionKey: key,
         installationId: "503",
-        repository: { owner: "Other", repo: "Repo" },
+        checkRepository: { owner: "Other", repo: "Repo" },
       })
     ).tenantId,
     secondTenantId,
@@ -382,7 +418,7 @@ try {
       slackBotToken: "xoxb-new",
       encryptionKey: key,
       installationId: "503",
-      repository: { owner: "Other", repo: "Repo" },
+      checkRepository: { owner: "Other", repo: "Repo" },
       tenantId: "f4a35af1-843d-4276-af6e-25f3929f16b3",
     }),
     /re-pair existing integrations|different tenants/,
@@ -400,7 +436,7 @@ try {
     slackBotToken: "xoxb-new",
     encryptionKey: key,
     installationId: "504",
-    repository: { owner: "Other", repo: "Repo" },
+    checkRepository: { owner: "Other", repo: "Repo" },
     tenantId: secondTenantId,
     selectedChannelId: "CNEW",
     replacePairing: true,
@@ -419,7 +455,7 @@ try {
     slackBotToken: "xoxb-new",
     encryptionKey: key,
     installationId: "505",
-    repository: { owner: "Other", repo: "Repo" },
+    checkRepository: { owner: "Other", repo: "Repo" },
     tenantId: "5b0c3c39-0d5a-4f0f-9a43-7d1f0c2d6e11",
     replacePairing: true,
   });
@@ -458,7 +494,7 @@ try {
         slackBotToken: `T-${shared}-${shared === "slack" || shared === "implicit-tenant" ? 0 : offset}`,
         encryptionKey: key,
         installationId: `${8000 + index * 10 + (shared === "installation" || shared === "implicit-tenant" ? 0 : offset)}`,
-        repository: { owner: "Race", repo: "Repo" },
+        checkRepository: { owner: "Race", repo: "Repo" },
         tenantId: shared === "implicit-tenant" ? undefined : crypto.randomUUID(),
       })));
       try {
@@ -477,7 +513,7 @@ try {
         assert.equal(rejected.length, 1);
         assert.match(String(rejected[0].reason), /re-pair existing integrations|different tenants/);
       }
-      const validation = await validateMultitenancy({ db, encryptionKey: key });
+      const validation = await validateIntegrity({ db, encryptionKey: key });
       assert.equal(validation.ok, true, validation.issues.join("; "));
     }
   } finally {
@@ -517,7 +553,7 @@ try {
   });
   const first = await stage(1);
   const oauthInput = { db, providers: oauthProviders, slackInstallationId: first.id,
-    encryptionKey: key, installationId: "20001", repository: { owner: "OAuth", repo: "One" }, selectedChannelId: "COAUTH1" };
+    encryptionKey: key, installationId: "20001", checkRepository: { owner: "OAuth", repo: "One" }, selectedChannelId: "COAUTH1" };
   const beforeOauth = await snapshot();
   await assert.rejects(provisionTenant({ ...oauthInput, slackBotToken: first.token }), /exactly one/);
   await assert.rejects(provisionTenant({ ...oauthInput, slackInstallationId: undefined }), /exactly one/);
@@ -607,7 +643,7 @@ try {
   assert.equal((await getSlackOAuthInstallationStatus(db, third.id))?.status, "cancelled");
   const thirdRetry = await stage(3);
   await provisionTenant({ ...oauthInput, slackInstallationId: thirdRetry.id, installationId: "20003", selectedChannelId: "COAUTH3" });
-  assert.equal((await validateMultitenancy({ db, encryptionKey: key })).ok, true);
+  assert.equal((await validateIntegrity({ db, encryptionKey: key })).ok, true);
 
   // Exercise the actual compiled command without provider network or shared dist.
   // The preload supplies only fake fetch responses; CLI parsing, env validation,
@@ -647,7 +683,7 @@ try {
       child.stdin!.end(manualToken === undefined ? undefined : `${manualToken}\n`);
     });
     const fourth = await stage(4);
-    const provisionArgs = ["provision-tenant", "--environment", "selftest", "--confirm", "--installation-id", "21001", "--repository", "Cli/Repo", "--selected-channel-id", "CCLI", "--slack-installation-id", fourth.id];
+    const provisionArgs = ["provision-tenant", "--environment", "selftest", "--confirm", "--installation-id", "21001", "--check-repository", "Cli/Repo", "--selected-channel-id", "CCLI", "--slack-installation-id", fourth.id];
     await assert.rejects(cli(provisionArgs.filter((arg) => arg !== "--confirm")), /requires --confirm/);
     await assert.rejects(cli(provisionArgs, { RAILWAY_ENVIRONMENT_NAME: "production" }), /does not match/);
     const beforeCliFailure = await snapshot();
@@ -668,6 +704,7 @@ try {
     assert.equal(activatedCli.stderr, "");
     const activatedReceipt = JSON.parse(activatedCli.stdout);
     assert.equal(activatedReceipt.slackTeamId, fourth.teamId);
+    assert.equal(activatedReceipt.checkedRepositoryId, "21001");
     assert.equal((await db.selectFrom("slack_workspaces").select("bot_token_ciphertext").where("team_id", "=", fourth.teamId).executeTakeFirstOrThrow()).bot_token_ciphertext, fourth.expectedCiphertext);
     const brokenConfig = { FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY: "invalid", GITHUB_OIDC_ISSUER: "invalid", SLACK_APP_ID: "partial" };
     const stateBeforeRead = await db.selectFrom("slack_oauth_installations").selectAll().where("id", "=", fourth.id).executeTakeFirstOrThrow();

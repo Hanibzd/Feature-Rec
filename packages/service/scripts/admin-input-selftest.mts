@@ -3,13 +3,14 @@ import { PassThrough } from "node:stream";
 import type { ReadStream } from "node:tty";
 import { parseArgs, readSecret } from "../src/admin-input";
 
-for (const [command, option] of [["migrate-to", "expect-current"], ["provision-tenant", "tenant-id"], ["provision-tenant", "selected-channel-id"], ["provision-tenant", "slack-installation-id"], ["slack-installation-status", "slack-installation-id"], ["cancel-slack-installation", "slack-installation-id"]]) {
+for (const [command, option] of [["migrate-to", "expect-current"], ["provision-tenant", "tenant-id"], ["provision-tenant", "check-repository"], ["provision-tenant", "selected-channel-id"], ["provision-tenant", "slack-installation-id"], ["slack-installation-status", "slack-installation-id"], ["cancel-slack-installation", "slack-installation-id"], ["disable-tenant", "tenant-id"]]) {
   assert.throws(() => parseArgs([command, `--${option}`]), /argument missing|requires a value/);
   assert.throws(() => parseArgs([command, `--${option}= `]), /non-empty value/);
   assert.throws(() => parseArgs([command, `--${option}`, "--confirm"]), /argument is ambiguous/);
   assert.throws(() => parseArgs([command, `--${option}=first`, `--${option}=second`]), /only be supplied once/);
 }
 assert.throws(() => parseArgs(["provision-tenant", "--confrim"]), /Unknown option/);
+assert.throws(() => parseArgs(["provision-tenant", "--repository", "owner/repo"]), /Unknown option/);
 assert.throws(() => parseArgs(["migration-status", "--replace-pairing"]), /not supported/);
 assert.throws(() => parseArgs(["provision-tenant", "--confirm=false"]), /does not take an argument/);
 assert.throws(() => parseArgs(["provision-tenant", "--confirm", "unexpected"]), /Unexpected positional/);
@@ -22,6 +23,8 @@ assert.equal(parseArgs(["provision-tenant", "--slack-installation-id", "pending-
 assert.equal(parseArgs(["cancel-slack-installation", "--slack-installation-id", "pending-id", "--confirm"]).flags.get("confirm"), true);
 assert.throws(() => parseArgs(["slack-installation-status", "--confirm"]), /not supported/);
 assert.throws(() => parseArgs(["cancel-slack-installation", "--replace-pairing"]), /not supported/);
+assert.throws(() => parseArgs(["disable-tenant", "--replace-pairing"]), /not supported/);
+assert.equal(parseArgs(["disable-tenant", "--tenant-id", "tenant", "--confirm"]).flags.get("tenant-id"), "tenant");
 
 class FakeTty extends PassThrough {
   isTTY = true;

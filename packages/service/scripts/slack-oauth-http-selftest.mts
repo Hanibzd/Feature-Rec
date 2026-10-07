@@ -646,7 +646,7 @@ try {
   };
   const provisionInputs = pairings.map((pairing) => ({
     db, providers: adminProviders, slackInstallationId: pairing.session.id, encryptionKey: key,
-    installationId: pairing.installationId, repository: { owner: pairing.owner, repo: pairing.repo }, selectedChannelId: pairing.channelId,
+    installationId: pairing.installationId, checkRepository: { owner: pairing.owner, repo: pairing.repo }, selectedChannelId: pairing.channelId,
   }));
   const expectedEnvelopes = await Promise.all(pairings.map(async (pairing) => (await raw(pairing.session.id)).bot_token_ciphertext));
   const pendingBeforeValidation = await raw(pairings[2].session.id);

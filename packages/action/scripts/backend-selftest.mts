@@ -47,7 +47,6 @@ apiUrl = `http://127.0.0.1:${address.port}`;
 process.env.NODE_ENV = "test";
 process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN = "request-credential";
 process.env.ACTIONS_ID_TOKEN_REQUEST_URL = `${apiUrl}/oidc?request=test`;
-delete process.env.FEATURE_REC_RUNNER_TOKEN;
 
 try {
   const started = await startCycle(`${apiUrl}///`, { prNumber: 7, headSha: "abc1234", owner: "untrusted", tenantId: "untrusted", prTitle: "untrusted" } as never);

@@ -1,7 +1,6 @@
 import crypto from "node:crypto";
 import type { Kysely, Transaction } from "kysely";
 import { sql } from "kysely";
-import { buildCycleKey } from "@feature-rec/core";
 import type { GitHubRepositoryIdentity } from "./github";
 import { encryptSlackToken } from "./slack-token-crypto";
 import type { DB } from "./storage/schema";
@@ -59,11 +58,12 @@ async function countTable(db: Database, table: keyof DB): Promise<number> {
   return Number(result.rows[0]?.count ?? "0");
 }
 
-export async function validateMultitenancy(input: {
+export async function validateIntegrity(input: {
   db: Database;
   encryptionKey: Buffer | null;
-  requireFutureCycleKeys?: boolean;
 }): Promise<ValidationReport> {
+  // Schema constraints already guarantee cycle identity, unique cycle keys and
+  // channel settings with a workspace. These checks cover what they cannot.
   const issues: string[] = [];
   const [tenants, enabledTenants, slackWorkspaces, githubInstallations, reviewCycles] =
     await Promise.all([
@@ -73,60 +73,6 @@ export async function validateMultitenancy(input: {
       countTable(input.db, "github_installations"),
       countTable(input.db, "review_cycles"),
     ]);
-
-  const nullCycleIds = await sql<{ count: string }>`
-    select count(*)::text as count from review_cycles
-    where tenant_id is null or repository_id is null
-  `.execute(input.db);
-  if (nullCycleIds.rows[0]?.count !== "0") {
-    issues.push(`${nullCycleIds.rows[0]?.count ?? "unknown"} review cycle(s) lack tenant/repository identity`);
-  }
-
-  const duplicateFutureKeys = await sql<{ tenant_id: string; repository_id: string; pr_number: number; head_sha: string; count: string }>`
-    select
-      tenant_id::text, repository_id::text, pr_number, head_sha,
-      count(*)::text as count
-    from review_cycles
-    where tenant_id is not null and repository_id is not null
-    group by tenant_id, repository_id, pr_number, head_sha
-    having count(*) > 1
-    order by tenant_id, repository_id, pr_number, head_sha
-  `.execute(input.db);
-  for (const collision of duplicateFutureKeys.rows) {
-    const key = buildCycleKey({ tenantId: collision.tenant_id, repositoryId: collision.repository_id, prNumber: collision.pr_number, headSha: collision.head_sha });
-    issues.push(`future cycle key collision (${collision.count} rows): ${key}`);
-  }
-
-  if (input.requireFutureCycleKeys) {
-    // Raw SQL keeps honest nullability: the validator may run against a
-    // database that has not applied 0010 yet.
-    const cycles = await sql<{
-      id: string;
-      tenant_id: string | null;
-      repository_id: string | null;
-      pr_number: number;
-      head_sha: string;
-      cycle_key: string;
-    }>`
-      select
-        id, tenant_id::text as tenant_id, repository_id::text as repository_id,
-        pr_number, head_sha, cycle_key
-      from review_cycles
-      order by id
-    `.execute(input.db);
-    for (const cycle of cycles.rows) {
-      if (cycle.tenant_id === null || cycle.repository_id === null) continue;
-      const expected = buildCycleKey({
-        tenantId: cycle.tenant_id,
-        repositoryId: cycle.repository_id,
-        prNumber: cycle.pr_number,
-        headSha: cycle.head_sha,
-      });
-      if (cycle.cycle_key !== expected) {
-        issues.push(`review cycle ${cycle.id} has not been switched to its multitenant cycle key`);
-      }
-    }
-  }
 
   const enabledMissing = await sql<{ tenant_id: string; slack_count: string; github_count: string }>`
     select
@@ -146,17 +92,6 @@ export async function validateMultitenancy(input: {
     );
   }
 
-  const orphans = await sql<{ team_id: string }>`
-    select distinct cs.team_id
-    from channel_settings cs
-    left join slack_workspaces sw on sw.team_id = cs.team_id
-    where sw.team_id is null
-    order by cs.team_id
-  `.execute(input.db);
-  for (const row of orphans.rows) {
-    issues.push(`channel settings for ${row.team_id} have no Slack workspace`);
-  }
-
   const tokenCheck = await inspectSlackTokenEncryption(input.db, input.encryptionKey);
   if (tokenCheck.keyError) issues.push(tokenCheck.keyError);
   for (const workspace of tokenCheck.invalidWorkspaces) {
@@ -172,6 +107,25 @@ export async function validateMultitenancy(input: {
     issues,
     counts: { tenants, enabledTenants, slackWorkspaces, githubInstallations, reviewCycles },
   };
+}
+
+export type DisableTenantReport = {
+  tenantId: string;
+  enabled: false;
+};
+
+export async function disableTenant(db: Kysely<DB>, tenantId: string): Promise<DisableTenantReport> {
+  const id = uuid(tenantId, "Tenant ID");
+  return db.transaction().execute(async (trx) => {
+    // Every writer of tenants.enabled holds this lock, so the state checked
+    // here cannot change before the update commits.
+    await lockTenantProvisioning(trx);
+    const tenant = await trx.selectFrom("tenants").select("enabled").where("id", "=", id).executeTakeFirst();
+    if (!tenant) throw new Error(`Tenant ${id} does not exist`);
+    if (!tenant.enabled) throw new Error(`Tenant ${id} is already disabled`);
+    await trx.updateTable("tenants").set({ enabled: false }).where("id", "=", id).execute();
+    return { tenantId: id, enabled: false };
+  });
 }
 
 async function loadPairings(input: {
@@ -196,7 +150,7 @@ export type ProvisionReport = {
   slackTeamId: string;
   githubInstallationId: string;
   githubAccountId: string;
-  repositoryId: string;
+  checkedRepositoryId: string;
   selectedChannelId: string | null;
   replacedPairings: string[];
 };
@@ -208,7 +162,9 @@ export async function provisionTenant(input: {
   slackInstallationId?: string;
   encryptionKey: Buffer;
   installationId: string;
-  repository: { owner: string; repo: string };
+  // Any one repository the installation grants. It is checked before
+  // activation and not stored: the tenant pairs the whole installation.
+  checkRepository: { owner: string; repo: string };
   tenantId?: string;
   selectedChannelId?: string;
   replacePairing?: boolean;
@@ -235,8 +191,8 @@ export async function provisionTenant(input: {
     }),
     input.providers.inspectInstallationRepository(
       input.installationId,
-      input.repository.owner,
-      input.repository.repo,
+      input.checkRepository.owner,
+      input.checkRepository.repo,
     ).catch((error: unknown) => {
       if (pending) throw new Error("GitHub provider validation failed for pending installation; check App permissions and repository access, then retry");
       throw error;
@@ -373,7 +329,7 @@ export async function provisionTenant(input: {
       slackTeamId: slack.teamId,
       githubInstallationId: repository.installationId,
       githubAccountId: repository.githubAccountId,
-      repositoryId: repository.repositoryId,
+      checkedRepositoryId: repository.repositoryId,
       selectedChannelId,
       replacedPairings: conflicts,
     };

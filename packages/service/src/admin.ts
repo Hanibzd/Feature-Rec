@@ -3,8 +3,9 @@ import { Kysely, PostgresDialect } from "kysely";
 import { Migrator } from "kysely/migration";
 import { Pool } from "pg";
 import {
+  disableTenant,
   provisionTenant,
-  validateMultitenancy,
+  validateIntegrity,
   type AdminProviders,
 } from "./admin-operations";
 import { readEnv, type ServiceEnv } from "./env";
@@ -24,18 +25,19 @@ Usage:
   node dist/admin.js migrate-to <migration> --environment <name> --confirm
     [--expect-current <migration>]
     (downgrades also require --expect-current, --service-stopped and --traffic-paused)
-  node dist/admin.js validate-contract-readiness --environment <name> [--require-future-cycle-keys]
+  node dist/admin.js validate-integrity --environment <name>
   node dist/admin.js provision-tenant --environment <name> --confirm
-    --installation-id <id> --repository <owner/repo> [--tenant-id <uuid>]
+    --installation-id <id> --check-repository <owner/repo> [--tenant-id <uuid>]
     [--selected-channel-id <id>] [--replace-pairing] [--slack-installation-id <uuid>]
     (without --slack-installation-id, reads the Slack bot token from a non-echoing TTY prompt or stdin)
   node dist/admin.js slack-installation-status --environment <name> --slack-installation-id <uuid>
   node dist/admin.js cancel-slack-installation --environment <name> --confirm --slack-installation-id <uuid>
+  node dist/admin.js disable-tenant --environment <name> --confirm --tenant-id <uuid>
 
 Run production commands inside Railway with:
   railway ssh -- node dist/admin.js <subcommand> ...
-For schema downgrades, stop the service first and run the retained admin artifact
-from a separate maintenance process. Do not downgrade from a live service shell.
+For schema downgrades, stop the service first and run the newer release's admin
+command from a separate maintenance process. Do not downgrade from a live service shell.
 `;
 
 function flag(args: ParsedArgs, name: string): string | undefined {
@@ -80,7 +82,7 @@ function requireEncryptionKey(env: ServiceEnv): Buffer {
 
 function parseRepository(value: string): { owner: string; repo: string } {
   const match = /^([^/]+)\/([^/]+)$/.exec(value);
-  if (!match) throw new Error("--repository must be in owner/repo form");
+  if (!match) throw new Error("--check-repository must be in owner/repo form");
   return { owner: match[1], repo: match[2] };
 }
 
@@ -176,14 +178,16 @@ async function main(): Promise<void> {
       return;
     }
 
+    if (args.command === "disable-tenant") {
+      requireConfirmation(args);
+      print(environment, await disableTenant(db, requireFlag(args, "tenant-id")));
+      return;
+    }
+
     // Administrative provider calls do not authenticate runners or serve a public URL.
     const env = readEnv({ ...process.env, FEATURE_REC_BASE_URL: "https://admin.invalid" });
-    if (args.command === "validate-contract-readiness") {
-      const report = await validateMultitenancy({
-        db,
-        encryptionKey: env.slackTokenEncryptionKey,
-        requireFutureCycleKeys: boolFlag(args, "require-future-cycle-keys"),
-      });
+    if (args.command === "validate-integrity") {
+      const report = await validateIntegrity({ db, encryptionKey: env.slackTokenEncryptionKey });
       print(environment, report);
       if (!report.ok) process.exitCode = 1;
       return;
@@ -193,7 +197,7 @@ async function main(): Promise<void> {
       requireConfirmation(args);
       const encryptionKey = requireEncryptionKey(env);
       const installationId = requireFlag(args, "installation-id");
-      const repository = parseRepository(requireFlag(args, "repository"));
+      const checkRepository = parseRepository(requireFlag(args, "check-repository"));
       const slackInstallationId = flag(args, "slack-installation-id");
       const token = slackInstallationId === undefined ? await readSecret() : undefined;
       const report = await provisionTenant({
@@ -203,7 +207,7 @@ async function main(): Promise<void> {
         slackInstallationId,
         encryptionKey,
         installationId,
-        repository,
+        checkRepository,
         tenantId: flag(args, "tenant-id"),
         selectedChannelId: flag(args, "selected-channel-id"),
         replacePairing: boolFlag(args, "replace-pairing"),
