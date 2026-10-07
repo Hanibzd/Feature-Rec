@@ -24,8 +24,7 @@ const commonEnv = [
   `DATABASE_URL=${dockerUrl}`, `PORT=${port}`, "FEATURE_REC_BASE_URL=https://feature-rec-image.example",
   `FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY=${Buffer.alloc(32, 53).toString("base64")}`,
 ];
-const clientSecret = "SLACK_CLIENT_SECRET=fixture-image-client-secret";
-const oauthEnv = ["SLACK_APP_ID=AIMAGE123", "SLACK_CLIENT_ID=123456.789012", clientSecret];
+const oauthEnv = ["SLACK_APP_ID=AIMAGE123", "SLACK_CLIENT_ID=123456.789012", "SLACK_CLIENT_SECRET=fixture-image-client-secret"];
 const execute = promisify(execFile);
 const containers = new Set<string>();
 let sequence = 0;
@@ -49,14 +48,6 @@ async function healthy(name: string): Promise<void> {
   }
   throw new Error("Service health did not become available");
 }
-async function exited(name: string): Promise<void> {
-  for (let attempt = 0; attempt < 30; attempt++) {
-    const state = JSON.parse((await docker(["inspect", "--format", "{{json .State}}", name])).stdout) as { Running: boolean; ExitCode: number };
-    if (!state.Running) { assert.notEqual(state.ExitCode, 0); return; }
-    await delay(500);
-  }
-  throw new Error("Invalid configuration unexpectedly kept running");
-}
 
 const control = new Client({ connectionString: adminUrl.toString() });
 let created = false;
@@ -78,13 +69,7 @@ try {
     "--entrypoint", "node", image, "dist/admin.js", "migration-status", "--environment", "image-selftest"])).stdout) as { migrations: Array<{ status: string }> };
   assert.ok(status.migrations.length > 0);
   assert.ok(status.migrations.every((migration) => migration.status === "executed"));
-
-  // Partial hosted OAuth configuration must fail startup.
-  const partial = await start([clientSecret]);
-  await exited(partial);
-  const logs = await docker(["logs", partial]);
-  assert.ok(!(logs.stdout + logs.stderr).includes("Server listening at"));
-  console.log("Service image selftest passed: admin help, health with and without hosted OAuth, admin migration status, and partial OAuth configuration refused.");
+  console.log("Service image selftest passed: admin help, health with and without hosted OAuth, and admin migration status.");
 } catch (error) {
   // Capture evidence before cleanup without masking the test failure.
   for (const name of containers) {

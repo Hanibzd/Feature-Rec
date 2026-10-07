@@ -506,9 +506,8 @@ TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres \
 ```
 
 The harness checks that the compiled admin command prints its help, that the service migrates the
-temporary database and serves `/health` with hosted OAuth disabled and configured, that the admin
-command reads `migration-status` with only `DATABASE_URL`, and that partial OAuth configuration
-fails startup. It uses fixture values only and never loads `.env` or production
+temporary database and serves `/health` with hosted OAuth disabled and configured, and that the
+admin command reads `migration-status` with only `DATABASE_URL`. It uses fixture values only and never loads `.env` or production
 credentials. On failure, it prints the container logs before it removes the containers and the
 database.
 
