@@ -14,7 +14,7 @@ import { Migrator } from "kysely/migration";
 import { Client, Pool } from "pg";
 import {
   provisionTenant,
-  validateMultitenancy,
+  validateIntegrity,
   type AdminProviders,
 } from "../src/admin-operations";
 import { decryptSlackToken, encryptSlackToken } from "../src/slack-token-crypto";
@@ -140,7 +140,7 @@ try {
   }
   await runAdmin(["migrate-to", "0011_multitenant_contract", "--confirm", "--expect-current", "0007_mention_modes"]);
   assert.equal(JSON.parse((await runAdmin(["migration-status"])).stdout).migrations.at(-1).name, "0011_multitenant_contract");
-  await assert.rejects(runAdmin(["validate-contract-readiness"]), /canonical base64/);
+  await assert.rejects(runAdmin(["validate-integrity"]), /canonical base64/);
 
   assert.deepEqual(await inspectSlackTokenEncryption(db, null), { keyError: null, invalidPendingInstallations: [], invalidWorkspaces: [] });
   for (const selectedChannelId of ["", " ", "CUNKNOWN"]) {
@@ -186,36 +186,16 @@ try {
     await db.selectFrom("tenants").select("enabled").where("id", "=", tenantId).executeTakeFirstOrThrow().then((row) => row.enabled),
     true,
   );
-  // Cycles written by the deploy-C runtime carry canonical multitenant keys and
-  // no repository names; the contract-readiness validator accepts them.
-  await db.insertInto("review_cycles").values([
-    {
-      id: "cycle-one", cycle_key: `${tenantId}/101#1:abcdefg`, tenant_id: tenantId, repository_id: "101",
-      pr_number: 1, pr_author: "a", pr_title: "one", head_sha: "abcdefg",
-      status: "failed", attempt_id: "attempt-one", created_at: "2026-01-01", updated_at: "2026-01-01",
-    },
-    {
-      id: "cycle-two", cycle_key: `${tenantId}/102#2:hijklmn`, tenant_id: tenantId, repository_id: "102",
-      pr_number: 2, pr_author: "b", pr_title: "two", head_sha: "hijklmn",
-      status: "accepted", attempt_id: "attempt-two", created_at: "2026-01-01", updated_at: "2026-01-01",
-    },
-  ]).execute();
-  assert.equal(
-    (await validateMultitenancy({ db, encryptionKey: key, requireFutureCycleKeys: true })).ok,
-    true,
-  );
-
-  // A colliding identity with a stray key is reported, never silently resolved.
-  await db.insertInto("review_cycles").values({
-    id: "cycle-collision", cycle_key: "legacy-collision#1:abcdefg", tenant_id: tenantId, repository_id: "101",
-    pr_number: 1, pr_author: "c", pr_title: "collision", head_sha: "abcdefg",
-    status: "failed", attempt_id: "attempt-collision", created_at: "2026-01-01", updated_at: "2026-01-01",
-  }).execute();
-  const collision = await validateMultitenancy({ db, encryptionKey: key, requireFutureCycleKeys: true });
-  assert.equal(collision.ok, false);
-  assert.ok(collision.issues.some((issue) => issue.includes("future cycle key collision")));
-  assert.ok(collision.issues.some((issue) => issue.includes("has not been switched to its multitenant cycle key")));
-  await db.deleteFrom("review_cycles").where("id", "=", "cycle-collision").execute();
+  assert.equal((await validateIntegrity({ db, encryptionKey: key })).ok, true);
+  // An enabled tenant must keep exactly one workspace and one installation.
+  const unpairedTenantId = crypto.randomUUID();
+  await db.insertInto("tenants").values({ id: unpairedTenantId, enabled: true }).execute();
+  const unpaired = await validateIntegrity({ db, encryptionKey: key });
+  assert.equal(unpaired.ok, false);
+  assert.ok(unpaired.issues.includes(`enabled tenant ${unpairedTenantId} has 0 Slack workspace(s) and 0 GitHub installation(s)`));
+  await db.updateTable("tenants").set({ enabled: false }).where("id", "=", unpairedTenantId).execute();
+  assert.equal((await validateIntegrity({ db, encryptionKey: key })).ok, true);
+  await db.deleteFrom("tenants").where("id", "=", unpairedTenantId).execute();
 
   const wrongAad = encryptSlackToken({ token: "xoxb-admin", teamId: "TOTHER", key });
   await db
@@ -223,7 +203,7 @@ try {
     .set({ bot_token_ciphertext: wrongAad })
     .where("team_id", "=", "TADMIN")
     .execute();
-  const invalidCiphertext = await validateMultitenancy({ db, encryptionKey: key });
+  const invalidCiphertext = await validateIntegrity({ db, encryptionKey: key });
   assert.equal(invalidCiphertext.ok, false);
   assert.ok(invalidCiphertext.issues.some((issue) => issue.includes("team-bound AAD")));
   // An independently verified key lets even the sole corrupted token remain tenant-local.
@@ -237,7 +217,7 @@ try {
   const pendingWrongAad = encryptSlackToken({ token: "xoxb-pending", teamId: "TOTHER", key });
   await db.updateTable("slack_oauth_installations").set({ bot_token_ciphertext: pendingWrongAad })
     .where("id", "=", pendingSession.id).execute();
-  const pendingValidation = await validateMultitenancy({ db, encryptionKey: key });
+  const pendingValidation = await validateIntegrity({ db, encryptionKey: key });
   assert.ok(pendingValidation.issues.some((issue) => issue.includes(pendingSession.id) && issue.includes("team-bound AAD")));
   assert.ok(!JSON.stringify(pendingValidation).includes(pendingWrongAad));
   const portProbe = createServer();
@@ -477,7 +457,7 @@ try {
         assert.equal(rejected.length, 1);
         assert.match(String(rejected[0].reason), /re-pair existing integrations|different tenants/);
       }
-      const validation = await validateMultitenancy({ db, encryptionKey: key });
+      const validation = await validateIntegrity({ db, encryptionKey: key });
       assert.equal(validation.ok, true, validation.issues.join("; "));
     }
   } finally {
@@ -607,7 +587,7 @@ try {
   assert.equal((await getSlackOAuthInstallationStatus(db, third.id))?.status, "cancelled");
   const thirdRetry = await stage(3);
   await provisionTenant({ ...oauthInput, slackInstallationId: thirdRetry.id, installationId: "20003", selectedChannelId: "COAUTH3" });
-  assert.equal((await validateMultitenancy({ db, encryptionKey: key })).ok, true);
+  assert.equal((await validateIntegrity({ db, encryptionKey: key })).ok, true);
 
   // Exercise the actual compiled command without provider network or shared dist.
   // The preload supplies only fake fetch responses; CLI parsing, env validation,

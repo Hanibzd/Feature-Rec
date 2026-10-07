@@ -2,11 +2,11 @@ import { parseArgs as parseNodeArgs } from "node:util";
 import type { ReadStream, WriteStream } from "node:tty";
 
 const STRING_FLAGS = ["environment", "expect-current", "tenant-id", "selected-channel-id", "installation-id", "check-repository", "slack-installation-id"];
-const BOOLEAN_FLAGS = ["help", "confirm", "require-future-cycle-keys", "traffic-paused", "service-stopped", "replace-pairing"];
+const BOOLEAN_FLAGS = ["help", "confirm", "traffic-paused", "service-stopped", "replace-pairing"];
 const COMMAND_FLAGS: Record<string, string[]> = {
   "migration-status": [],
   "migrate-to": ["confirm", "expect-current", "traffic-paused", "service-stopped"],
-  "validate-contract-readiness": ["require-future-cycle-keys"],
+  "validate-integrity": [],
   "slack-installation-status": ["slack-installation-id"],
   "cancel-slack-installation": ["confirm", "slack-installation-id"],
   "provision-tenant": ["confirm", "slack-installation-id", "installation-id", "check-repository", "tenant-id", "selected-channel-id", "replace-pairing"],

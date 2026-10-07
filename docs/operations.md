@@ -386,7 +386,8 @@ Startup decrypt-checks active and pending tokens after checking that verifier. A
 or missing verifier prevents startup. A corrupt active token produces event
 `SLACK_TOKEN_DECRYPTION_FAILED` with tenant/workspace IDs; a corrupt pending token produces
 `SLACK_PENDING_TOKEN_DECRYPTION_FAILED` with installation/workspace IDs. These individual failures
-allow startup for other tenants but appear as readiness-validation issues. Repair the affected
+allow startup for other tenants but appear as issues in the
+[`validate-integrity`](#administration-commands) report. Repair the affected
 active credentials by
 [provisioning the tenant again](tenant-onboarding.md#change-or-remove-a-tenant), or cancel an
 unusable pending installation with `cancel-slack-installation` and start a fresh
@@ -406,21 +407,21 @@ railway ssh -- node dist/admin.js migration-status --environment production
 ```
 
 ```bash
-railway ssh -- node dist/admin.js validate-contract-readiness --environment production
+railway ssh -- node dist/admin.js validate-integrity --environment production
 ```
 
 | Command | Purpose |
 | --- | --- |
 | `migration-status` | List every registered migration with its execution time. |
 | `migrate-to <migration> --confirm [--expect-current <migration>]` | Migrate to the named migration. A downgrade also requires `--expect-current`, `--service-stopped` and `--traffic-paused`. The current-migration check and the migration share a lock with startup migrations; the command exits nonzero on any failure. |
-| `validate-contract-readiness [--require-future-cycle-keys]` | Read-only integrity report. It flags cycles without tenant/repository identity, colliding cycle identities, enabled tenants without exactly one workspace and one installation, channel settings without a workspace, key-verifier problems, and active or pending tokens that cannot be decrypted. With the flag, it also flags cycles whose key is not in the canonical format. It exits nonzero when it reports an issue. |
+| `validate-integrity` | Read-only integrity report for what the schema cannot enforce. It flags enabled tenants without exactly one Slack workspace and one GitHub installation, a missing or mismatched encryption-key verifier, and active or pending tokens that cannot be decrypted. Run it after a restore or a key change. It exits nonzero when it reports an issue. |
 | `provision-tenant` | Pair and activate a tenant; see [Provision the tenant](tenant-onboarding.md#provision-the-tenant). |
 | `slack-installation-status --slack-installation-id <uuid>` | Show a sanitized pending-installation record; exits nonzero if it does not exist. |
 | `cancel-slack-installation --confirm --slack-installation-id <uuid>` | Cancel an unconsumed installation and clear its staged secrets. |
 
 `migration-status`, `migrate-to`, `slack-installation-status` and `cancel-slack-installation` need
 only `DATABASE_URL`, so they keep working when integration configuration is broken.
-`validate-contract-readiness` and `provision-tenant` also read the runtime configuration, including
+`validate-integrity` and `provision-tenant` also read the runtime configuration, including
 the encryption key. The commands print no secrets.
 
 For a schema downgrade, follow [Schema downgrade](#schema-downgrade). Do not downgrade from a live

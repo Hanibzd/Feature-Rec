@@ -4,7 +4,7 @@ import { Migrator } from "kysely/migration";
 import { Pool } from "pg";
 import {
   provisionTenant,
-  validateMultitenancy,
+  validateIntegrity,
   type AdminProviders,
 } from "./admin-operations";
 import { readEnv, type ServiceEnv } from "./env";
@@ -24,7 +24,7 @@ Usage:
   node dist/admin.js migrate-to <migration> --environment <name> --confirm
     [--expect-current <migration>]
     (downgrades also require --expect-current, --service-stopped and --traffic-paused)
-  node dist/admin.js validate-contract-readiness --environment <name> [--require-future-cycle-keys]
+  node dist/admin.js validate-integrity --environment <name>
   node dist/admin.js provision-tenant --environment <name> --confirm
     --installation-id <id> --check-repository <owner/repo> [--tenant-id <uuid>]
     [--selected-channel-id <id>] [--replace-pairing] [--slack-installation-id <uuid>]
@@ -178,12 +178,8 @@ async function main(): Promise<void> {
 
     // Administrative provider calls do not authenticate runners or serve a public URL.
     const env = readEnv({ ...process.env, FEATURE_REC_BASE_URL: "https://admin.invalid" });
-    if (args.command === "validate-contract-readiness") {
-      const report = await validateMultitenancy({
-        db,
-        encryptionKey: env.slackTokenEncryptionKey,
-        requireFutureCycleKeys: boolFlag(args, "require-future-cycle-keys"),
-      });
+    if (args.command === "validate-integrity") {
+      const report = await validateIntegrity({ db, encryptionKey: env.slackTokenEncryptionKey });
       print(environment, report);
       if (!report.ok) process.exitCode = 1;
       return;
