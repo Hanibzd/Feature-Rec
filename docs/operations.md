@@ -505,12 +505,11 @@ TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres \
   pnpm --filter @feature-rec/service exec tsx scripts/service-image-selftest.mts feature-rec-service:local
 ```
 
-The harness checks health with hosted OAuth configured and disabled, the OAuth redirect and its
-cookies, the refusal of partial OAuth configuration, and the compiled administration commands
-against the migrated schema. It uses only the temporary database for migrations and fixtures, then
-removes its containers and database. On failure, it collects container stdout/stderr
-before removal, redacts known test credentials, and preserves the original test
-error if logs are unavailable. It never loads `.env` or production credentials.
+The harness checks that the compiled admin command prints its help, that the service migrates the
+temporary database and serves `/health` with hosted OAuth disabled and configured, and that partial
+OAuth configuration fails startup. It uses fixture values only and never loads `.env` or production
+credentials. On failure, it prints the container logs before it removes the containers and the
+database.
 
 The following checks exercise real integrations in staging.
 
