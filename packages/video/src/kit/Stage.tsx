@@ -225,26 +225,25 @@ export const Stage: React.FC<{
       const painted: Rect[] = [];
       let visited = 0;
       const transparent = (c: string) => c === "transparent" || /rgba\([^)]*,\s*0\)$/.test(c);
-      const walk = (el: Element) => {
-        for (const child of Array.from(el.children)) {
-          if (++visited > 4000) return;
-          if (child.hasAttribute("data-page-hint") || child.hasAttribute("data-morph-ghost")) continue;
-          const cs = getComputedStyle(child);
-          if (cs.display === "none" || cs.visibility === "hidden") continue;
-          const r = child.getBoundingClientRect();
-          const ownText = Array.from(child.childNodes).some((n) => n.nodeType === Node.TEXT_NODE && n.textContent?.trim());
-          const paints =
-            ownText ||
-            !transparent(cs.backgroundColor) ||
-            cs.backgroundImage !== "none" ||
-            cs.boxShadow !== "none" ||
-            (parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth) > 0 && !transparent(cs.borderTopColor)) ||
-            ["IMG", "svg", "VIDEO", "CANVAS", "INPUT", "TEXTAREA", "SELECT"].includes(child.tagName);
-          if (paints && r.width > 0 && r.height > 0) painted.push(toUi(child));
-          walk(child);
-        }
+      // The element itself counts too: a card's own background, border and padding are its edge.
+      const visit = (el: Element) => {
+        if (++visited > 4000) return;
+        if (el.hasAttribute("data-page-hint") || el.hasAttribute("data-morph-ghost")) return;
+        const cs = getComputedStyle(el);
+        if (cs.display === "none" || cs.visibility === "hidden") return;
+        const r = el.getBoundingClientRect();
+        const ownText = Array.from(el.childNodes).some((n) => n.nodeType === Node.TEXT_NODE && n.textContent?.trim());
+        const paints =
+          ownText ||
+          !transparent(cs.backgroundColor) ||
+          cs.backgroundImage !== "none" ||
+          cs.boxShadow !== "none" ||
+          (parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth) > 0 && !transparent(cs.borderTopColor)) ||
+          ["IMG", "svg", "VIDEO", "CANVAS", "INPUT", "TEXTAREA", "SELECT"].includes(el.tagName);
+        if (paints && r.width > 0 && r.height > 0) painted.push(toUi(el));
+        for (const child of Array.from(el.children)) visit(child);
       };
-      walk(uiNode);
+      visit(uiNode);
       if (painted.length > 0) {
         const left = Math.min(...painted.map((r) => r.x));
         const top = Math.min(...painted.map((r) => r.y));
