@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { assertNoRetyping, prepareRealComponents, type RevisionReader } from "../src/agent/real.ts";
+import { assertNoRetyping, localImportSources, prepareRealComponents, type RevisionReader } from "../src/agent/real.ts";
 import { globalVariables, loadTailwindConfig, themeDeclarations } from "../src/agent/theme.ts";
 import { withoutComponentsShownInContext } from "../src/feature-rec.ts";
 import { GENERATED_DIR } from "../src/paths.ts";
@@ -86,6 +86,17 @@ try {
 } finally {
   cleanup();
 }
+
+// Reconstruction context: local imports (code and CSS modules) of the AFTER file.
+const ctxRepo: Record<string, string> = {
+  "src/components/Pricing.tsx": `import { PlanNote } from "./PlanNote";\nimport { Button } from "@/components/ui/button";\nimport x from "some-pkg";`,
+  "src/components/PlanNote.tsx": `import styles from "./PlanNote.module.css";\nexport function PlanNote() { return <p className={styles.note} />; }`,
+  "src/components/PlanNote.module.css": `.note { border-left: 3px solid #6366f1; }`,
+  "src/components/ui/button.tsx": `export function Button() { return <button />; }`,
+  "tsconfig.json": `{ "compilerOptions": { "paths": { "@/*": ["./src/*"] } } }`,
+};
+const ctx = localImportSources("src/components/Pricing.tsx", (_rev, p) => ctxRepo[p] ?? null).map((f) => f.path);
+ok("reconstruction context follows relative and alias imports, CSS modules included", ["src/components/PlanNote.tsx", "src/components/ui/button.tsx", "src/components/PlanNote.module.css"].every((p) => ctx.includes(p)) && ctx.length === 3);
 
 // Retyping guard
 const after = `<div className="rounded-2xl bg-white p-8 shadow-xl"><p className="text-sm font-semibold text-slate-900">A</p><span className="mt-0.5 text-xs leading-5 text-slate-500">B</span></div>`;

@@ -8,7 +8,7 @@ import { writeSceneFile } from "../scenes";
 import { callClaude, hasApiKey, type Turn } from "./anthropic";
 import { hasOfflineScene } from "./offline";
 import { buildPrompt } from "./prompt";
-import { assertNoRetyping, prepareRealComponents, type RealComponents, type RevisionReader } from "./real";
+import { assertNoRetyping, localImportSources, prepareRealComponents, type RealComponents, type RevisionReader } from "./real";
 import { extractCodeBlock, validateScene } from "./validate";
 
 export type ReplicationSource = "anthropic" | "offline";
@@ -101,7 +101,8 @@ export async function replicate(
       onSkip: (reason) => log.info(`Real components unavailable for "${feature.id}" (${reason}); rebuilding the UI from the diff.`),
     });
     if (real) log.ok(`Real components for "${feature.id}": ${real.copied} file(s) rendered untouched.`);
-    const prompt = buildPrompt(feature, tokens, { real, themeLoaded: Boolean(opts.themeLoaded) });
+    const localImports = !real && opts.read ? localImportSources(feature.file, opts.read) : [];
+    const prompt = buildPrompt(feature, tokens, { real, themeLoaded: Boolean(opts.themeLoaded), localImports });
     const session: Session = {
       id: feature.id,
       system: prompt.system,

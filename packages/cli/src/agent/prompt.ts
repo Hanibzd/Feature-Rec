@@ -162,7 +162,7 @@ ${real.importLines}
 export function buildPrompt(
   feature: Feature,
   tokens: ProjectTokens,
-  opts: { real: RealComponents | null; themeLoaded: boolean },
+  opts: { real: RealComponents | null; themeLoaded: boolean; localImports?: Array<{ path: string; content: string }> },
 ): { system: string; cached: string; request: string } {
   const theme = opts.themeLoaded
     ? "THEME: the renderer includes the target repo's Tailwind theme and CSS variables, so its custom\nutilities (bg-brand-600, text-muted-foreground, rounded-card…) work as written."
@@ -194,7 +194,13 @@ AFTER:
 \`\`\`tsx
 ${feature.after}
 \`\`\`
-${opts.real ? `\n${realSection(opts.real)}\n` : ""}
+${opts.real ? `\n${realSection(opts.real)}\n` : ""}${
+    !opts.real && opts.localImports?.length
+      ? `\nLOCAL IMPORTS of the changed file (AFTER), to rebuild the pieces the diff does not show (their markup,\nclassNames and styles, CSS modules included — translate module classes to equivalent inline styles):\n${opts.localImports
+          .map((f) => `--- ${f.path}\n\`\`\`\n${f.content}\n\`\`\``)
+          .join("\n")}\n`
+      : ""
+  }
 Answer in two parts:
 1. PLAN — at most 7 short bullets: what changed (every visible delta), how a user would use it,
    page chrome? (yes → PageHint + a focus moment per change), the beats with frame numbers.

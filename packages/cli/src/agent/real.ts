@@ -242,3 +242,50 @@ export function assertNoRetyping(code: string, after: string): void {
     );
   }
 }
+
+/**
+ * Reconstruction context: the AFTER source of the changed file's local imports (components,
+ * utilities and stylesheets, CSS modules included), so a rebuilt UI matches pieces the diff does
+ * not show. Best effort: unresolvable imports are skipped; bounded in files and size.
+ */
+export function localImportSources(
+  file: string,
+  read: RevisionReader,
+  limits = { files: 6, chars: 20_000, depth: 2 },
+): Array<{ path: string; content: string }> {
+  const aliases = aliasRules((p) => read("after", p));
+  const resolve = (base: string): string | null => {
+    const ext = path.posix.extname(base);
+    const candidates = ext ? [base] : [...CODE_EXTENSIONS.map((e) => base + e), ...CODE_EXTENSIONS.map((e) => `${base}/index${e}`)];
+    return candidates.find((c) => read("after", c) !== null) ?? null;
+  };
+  const out: Array<{ path: string; content: string }> = [];
+  const seen = new Set([file]);
+  let chars = 0;
+  let frontier = [file];
+  for (let depth = 0; depth < limits.depth && frontier.length > 0; depth++) {
+    const next: string[] = [];
+    for (const current of frontier) {
+      for (const spec of specifiers(read("after", current) ?? "")) {
+        let local: string | null = null;
+        if (spec.startsWith("./") || spec.startsWith("../")) local = resolve(path.posix.normalize(path.posix.join(path.posix.dirname(current), spec)));
+        else {
+          const rule = aliases.find((r) => spec.startsWith(r.prefix));
+          for (const t of rule?.targets ?? []) {
+            local = resolve(path.posix.normalize(t + spec.slice(rule!.prefix.length)));
+            if (local) break;
+          }
+        }
+        if (!local || seen.has(local)) continue;
+        seen.add(local);
+        const content = read("after", local);
+        if (content === null || out.length >= limits.files || chars + content.length > limits.chars) continue;
+        out.push({ path: local, content });
+        chars += content.length;
+        if (CODE_EXTENSIONS.includes(path.posix.extname(local))) next.push(local);
+      }
+    }
+    frontier = next;
+  }
+  return out;
+}
