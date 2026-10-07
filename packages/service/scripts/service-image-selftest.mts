@@ -17,7 +17,9 @@ const dockerUrl = new URL(adminUrl);
 dockerUrl.pathname = `/${dbName}`;
 dockerUrl.hostname = process.env.SERVICE_IMAGE_DATABASE_HOST ?? (process.platform === "linux" ? "127.0.0.1" : "host.docker.internal");
 const network = process.platform === "linux" ? ["--network", "host"] : [];
-const port = String(30_000 + crypto.randomInt(20_000));
+// Stay below the ephemeral ranges (Linux 32768+, macOS 49152+): with host
+// networking, an outbound connection can already hold a port in those ranges.
+const port = String(10_000 + crypto.randomInt(20_000));
 const commonEnv = [
   `DATABASE_URL=${dockerUrl}`, `PORT=${port}`, "FEATURE_REC_BASE_URL=https://feature-rec-image.example",
   `FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY=${Buffer.alloc(32, 53).toString("base64")}`,
