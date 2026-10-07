@@ -13,6 +13,7 @@ import { Kysely, PostgresDialect, sql } from "kysely";
 import { Migrator } from "kysely/migration";
 import { Client, Pool } from "pg";
 import {
+  disableTenant,
   provisionTenant,
   validateIntegrity,
   type AdminProviders,
@@ -142,6 +143,24 @@ try {
   assert.equal(JSON.parse((await runAdmin(["migration-status"])).stdout).migrations.at(-1).name, "0011_multitenant_contract");
   await assert.rejects(runAdmin(["validate-integrity"]), /canonical base64/);
 
+  // disable-tenant needs only the database and succeeds only for an existing, enabled tenant.
+  const tenantEnabled = async (id: string) =>
+    (await db.selectFrom("tenants").select("enabled").where("id", "=", id).executeTakeFirst())?.enabled;
+  const disableId = crypto.randomUUID();
+  await db.insertInto("tenants").values({ id: disableId, enabled: true }).execute();
+  await assert.rejects(runAdmin(["disable-tenant", "--tenant-id", disableId]), /requires --confirm/);
+  await assert.rejects(runAdmin(["disable-tenant", "--confirm"]), /--tenant-id is required/);
+  await assert.rejects(runAdmin(["disable-tenant", "--confirm", "--tenant-id", "not-a-uuid"]), /Tenant ID must be a UUID/);
+  const unknownId = crypto.randomUUID();
+  await assert.rejects(runAdmin(["disable-tenant", "--confirm", "--tenant-id", unknownId]), new RegExp(`Tenant ${unknownId} does not exist`));
+  assert.equal(await tenantEnabled(disableId), true);
+  const disabledCli = JSON.parse((await runAdmin(["disable-tenant", "--confirm", "--tenant-id", disableId.toUpperCase()])).stdout);
+  assert.deepEqual(disabledCli, { environment: "selftest", tenantId: disableId, enabled: false });
+  assert.equal(await tenantEnabled(disableId), false);
+  await assert.rejects(runAdmin(["disable-tenant", "--confirm", "--tenant-id", disableId]), new RegExp(`Tenant ${disableId} is already disabled`));
+  assert.equal(await tenantEnabled(disableId), false);
+  await db.deleteFrom("tenants").where("id", "=", disableId).execute();
+
   assert.deepEqual(await inspectSlackTokenEncryption(db, null), { keyError: null, invalidPendingInstallations: [], invalidWorkspaces: [] });
   for (const selectedChannelId of ["", " ", "CUNKNOWN"]) {
     await assert.rejects(provisionTenant({ db, providers, slackBotToken: "xoxb-new", encryptionKey: key, installationId: "502", checkRepository: { owner: "Beta", repo: "Three" }, selectedChannelId }), /channel ID must not be empty|not a member/);
@@ -186,6 +205,43 @@ try {
     await db.selectFrom("tenants").select("enabled").where("id", "=", tenantId).executeTakeFirstOrThrow().then((row) => row.enabled),
     true,
   );
+  // Disabling waits for the provisioning lock, changes only the flag, and
+  // provisioning the tenant again enables it.
+  await db.insertInto("channel_settings").values({
+    team_id: "TADMIN", channel_id: "CADMIN", mention_mode: "approvers",
+    mention_audience: null, approvers: '["UAPPROVER"]', updated_by: "UAPPROVER", updated_at: new Date().toISOString(),
+  }).execute();
+  const integrations = async () => ({
+    workspace: await db.selectFrom("slack_workspaces").selectAll().where("tenant_id", "=", tenantId).executeTakeFirstOrThrow(),
+    installation: await db.selectFrom("github_installations").selectAll().where("tenant_id", "=", tenantId).executeTakeFirstOrThrow(),
+    settings: await db.selectFrom("channel_settings").selectAll().where("team_id", "=", "TADMIN").execute(),
+  });
+  const beforeDisable = await integrations();
+  const disableBlocker = new Client({ connectionString: testUrl });
+  await disableBlocker.connect();
+  try {
+    await disableBlocker.query("select pg_advisory_lock(hashtextextended('tenant-integration-provisioning', 0))");
+    const disabling = disableTenant(db, tenantId);
+    try {
+      await waitForBlockedQueries(1);
+      assert.equal(await tenantEnabled(tenantId), true);
+    } finally {
+      await disableBlocker.query("select pg_advisory_unlock(hashtextextended('tenant-integration-provisioning', 0))");
+    }
+    assert.deepEqual(await disabling, { tenantId, enabled: false });
+  } finally {
+    await disableBlocker.end();
+  }
+  assert.equal(await tenantEnabled(tenantId), false);
+  assert.deepEqual(await integrations(), beforeDisable);
+  await assert.rejects(disableTenant(db, tenantId), /is already disabled/);
+  await provisionTenant({
+    db, providers: adminRepositoryProviders, slackBotToken: "xoxb-admin", encryptionKey: key,
+    installationId: "501", checkRepository: { owner: "Acme", repo: "One" }, tenantId,
+  });
+  assert.equal(await tenantEnabled(tenantId), true);
+  assert.deepEqual((await integrations()).settings, beforeDisable.settings);
+  await db.deleteFrom("channel_settings").where("team_id", "=", "TADMIN").execute();
   assert.equal((await validateIntegrity({ db, encryptionKey: key })).ok, true);
   // An enabled tenant must keep exactly one workspace and one installation.
   const unpairedTenantId = crypto.randomUUID();

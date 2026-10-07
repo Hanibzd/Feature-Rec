@@ -209,6 +209,22 @@ If anything fails, see [Troubleshooting](#troubleshooting).
 - **GitHub App uninstalled or repository removed from it.** Workflow calls for the affected
   repositories fail with `403`. Restore the grant; if the App was reinstalled, provision it as for
   a GitHub App reinstall above.
+- **Disable a tenant.** Stop serving a tenant without deleting anything:
+
+  ```bash
+  railway ssh -- node dist/admin.js disable-tenant --environment production --confirm \
+    --tenant-id <tenant-id>
+  ```
+
+  The command refuses a tenant that does not exist or is already disabled. It changes only the
+  tenant's enabled flag: the Slack credential, channel selection and settings, GitHub installation
+  and review history stay. Workflow calls for the tenant's repositories then fail with `403`. Slash
+  commands answer `Feature-Rec is not enabled for this Slack workspace.`, and button clicks record
+  no decision, so check runs that wait for a decision stay pending. A verified Slack uninstall or
+  token revocation is still processed while the tenant is disabled, as described above. To enable
+  the tenant again, the customer opens the Slack start URL again, and you provision the new pending
+  installation with the tenant's `--tenant-id`, its GitHub installation and a repository to check.
+  If the app was uninstalled in the meantime, also reselect the channel and reapply its settings.
 - **Abandoned installation.** Cancel a pending installation that will not be provisioned:
 
   ```bash
@@ -220,7 +236,7 @@ If anything fails, see [Troubleshooting](#troubleshooting).
   uninstall the app from the workspace for that. Status and cancellation need only database access,
   so they work even when provider credentials or the encryption key are unavailable.
 
-No admin command deletes or disables a tenant directly. Tenant records and review history are kept.
+No admin command deletes a tenant. Tenant records and review history are kept.
 
 ## Manual token provisioning
 

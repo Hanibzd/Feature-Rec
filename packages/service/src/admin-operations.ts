@@ -109,6 +109,25 @@ export async function validateIntegrity(input: {
   };
 }
 
+export type DisableTenantReport = {
+  tenantId: string;
+  enabled: false;
+};
+
+export async function disableTenant(db: Kysely<DB>, tenantId: string): Promise<DisableTenantReport> {
+  const id = uuid(tenantId, "Tenant ID");
+  return db.transaction().execute(async (trx) => {
+    // Every writer of tenants.enabled holds this lock, so the state checked
+    // here cannot change before the update commits.
+    await lockTenantProvisioning(trx);
+    const tenant = await trx.selectFrom("tenants").select("enabled").where("id", "=", id).executeTakeFirst();
+    if (!tenant) throw new Error(`Tenant ${id} does not exist`);
+    if (!tenant.enabled) throw new Error(`Tenant ${id} is already disabled`);
+    await trx.updateTable("tenants").set({ enabled: false }).where("id", "=", id).execute();
+    return { tenantId: id, enabled: false };
+  });
+}
+
 async function loadPairings(input: {
   db: Database;
   tenantId: string;

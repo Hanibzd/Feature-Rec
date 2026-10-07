@@ -3,6 +3,7 @@ import { Kysely, PostgresDialect } from "kysely";
 import { Migrator } from "kysely/migration";
 import { Pool } from "pg";
 import {
+  disableTenant,
   provisionTenant,
   validateIntegrity,
   type AdminProviders,
@@ -31,6 +32,7 @@ Usage:
     (without --slack-installation-id, reads the Slack bot token from a non-echoing TTY prompt or stdin)
   node dist/admin.js slack-installation-status --environment <name> --slack-installation-id <uuid>
   node dist/admin.js cancel-slack-installation --environment <name> --confirm --slack-installation-id <uuid>
+  node dist/admin.js disable-tenant --environment <name> --confirm --tenant-id <uuid>
 
 Run production commands inside Railway with:
   railway ssh -- node dist/admin.js <subcommand> ...
@@ -173,6 +175,12 @@ async function main(): Promise<void> {
         print(environment, { installation });
         if (!installation) process.exitCode = 1;
       }
+      return;
+    }
+
+    if (args.command === "disable-tenant") {
+      requireConfirmation(args);
+      print(environment, await disableTenant(db, requireFlag(args, "tenant-id")));
       return;
     }
 

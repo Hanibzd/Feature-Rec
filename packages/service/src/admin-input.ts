@@ -9,6 +9,7 @@ const COMMAND_FLAGS: Record<string, string[]> = {
   "validate-integrity": [],
   "slack-installation-status": ["slack-installation-id"],
   "cancel-slack-installation": ["confirm", "slack-installation-id"],
+  "disable-tenant": ["confirm", "tenant-id"],
   "provision-tenant": ["confirm", "slack-installation-id", "installation-id", "check-repository", "tenant-id", "selected-channel-id", "replace-pairing"],
   help: [],
 };

@@ -24,7 +24,7 @@ appendFileSync(process.env.IMAGE_TEST_CALLS, JSON.stringify([args[0], args[0] ==
 switch (args[0]) {
   case "run":
     if (args.includes("--help")) {
-      console.log("--slack-installation-id slack-installation-status cancel-slack-installation");
+      console.log("--slack-installation-id slack-installation-status cancel-slack-installation disable-tenant validate-integrity --check-repository");
       break;
     }
     const env = Object.fromEntries(args.flatMap((value, index) => {

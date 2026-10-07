@@ -90,6 +90,9 @@ try {
   assert.match(help, /--slack-installation-id/);
   assert.match(help, /slack-installation-status/);
   assert.match(help, /cancel-slack-installation/);
+  assert.match(help, /disable-tenant/);
+  assert.match(help, /validate-integrity/);
+  assert.match(help, /--check-repository/);
 
   const disabled = await start();
   await healthy(disabled);
@@ -146,6 +149,13 @@ try {
     assert.equal((JSON.parse(cancelled) as { cancelled: boolean }).cancelled, true);
   }
   assert.equal((await db.query<{ count: string }>("select count(*) from slack_oauth_installations where state_hash is not null or browser_binding_hash is not null or bot_token_ciphertext is not null")).rows[0].count, "0");
+
+  const tenantId = crypto.randomUUID();
+  await db.query("insert into tenants (id, enabled) values ($1, true)", [tenantId]);
+  const disabledTenant = JSON.parse((await admin(["disable-tenant", "--tenant-id", tenantId, "--confirm"])).stdout) as unknown;
+  assert.deepEqual(disabledTenant, { environment: "image-selftest", tenantId, enabled: false });
+  assert.equal((await db.query<{ enabled: boolean }>("select enabled from tenants where id = $1", [tenantId])).rows[0].enabled, false);
+  await assert.rejects(admin(["disable-tenant", "--tenant-id", tenantId, "--confirm"]), /is already disabled/);
   const final = await start(oauthEnv);
   await healthy(final);
   await stop(final);
@@ -153,7 +163,7 @@ try {
     const logs = await docker(["logs", name]);
     sanitized(logs.stdout + logs.stderr);
   }
-  console.log("Service image selftest passed: configured/disabled health, redirect/cookies, partial configuration, compiled admin status and cancellation.");
+  console.log("Service image selftest passed: configured/disabled health, redirect/cookies, partial configuration, compiled admin status, cancellation and tenant disabling.");
 } catch (error) {
   // Capture evidence before cleanup, without leaking fixtures or masking the test failure.
   for (const name of containers) {

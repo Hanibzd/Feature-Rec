@@ -418,9 +418,11 @@ railway ssh -- node dist/admin.js validate-integrity --environment production
 | `provision-tenant` | Pair and activate a tenant; see [Provision the tenant](tenant-onboarding.md#provision-the-tenant). |
 | `slack-installation-status --slack-installation-id <uuid>` | Show a sanitized pending-installation record; exits nonzero if it does not exist. |
 | `cancel-slack-installation --confirm --slack-installation-id <uuid>` | Cancel an unconsumed installation and clear its staged secrets. |
+| `disable-tenant --confirm --tenant-id <uuid>` | Disable an enabled tenant without deleting anything; see [Change or remove a tenant](tenant-onboarding.md#change-or-remove-a-tenant). It exits nonzero if the tenant does not exist or is already disabled. |
 
-`migration-status`, `migrate-to`, `slack-installation-status` and `cancel-slack-installation` need
-only `DATABASE_URL`, so they keep working when integration configuration is broken.
+`migration-status`, `migrate-to`, `slack-installation-status`, `cancel-slack-installation` and
+`disable-tenant` need only `DATABASE_URL`, so they keep working when integration configuration is
+broken.
 `validate-integrity` and `provision-tenant` also read the runtime configuration, including
 the encryption key. The commands print no secrets.
 
