@@ -9,6 +9,5 @@
  * like bg-[#16161F]) so the same classNames from the target repo render 1:1.
  * Tailwind v4 scans the source for class literals automatically.
  */
-:root {
-  color-scheme: dark;
-}
+/* No color-scheme here: text without an explicit color must render like it does in the product
+ * (the Stage sets the default text color from the page background). */

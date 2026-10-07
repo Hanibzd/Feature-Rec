@@ -66,6 +66,51 @@ function gitReader(repoRoot: string, revisions: { base: string; head: string }):
   };
 }
 
+/** Does `source` (the file at `importer`) import `target`? Relative paths and "@/"/"~/" aliases. */
+function importsFile(importer: string, source: string, target: string): boolean {
+  const stem = (file: string) => file.replace(/\.(tsx|jsx|ts|js)$/, "").replace(/\/index$/, "");
+  const goal = stem(target);
+  return [...source.matchAll(/\bfrom\s*["']([^"']+)["']/g)].some(([, spec]) => {
+    if (spec.startsWith(".")) return stem(path.posix.join(path.posix.dirname(importer), spec)) === goal;
+    const tail = stem(spec).replace(/^[@~]\//, "");
+    return goal === tail || goal.endsWith(`/${tail}`);
+  });
+}
+
+/**
+ * Where the changed component is used: files at the PR head that import it (pages, parents).
+ * Their markup is the component's real surroundings (a form's page title, a card's list), so
+ * the scene can frame it the way users meet it without inventing anything.
+ */
+function findUsages(repoRoot: string, head: string, file: string): Array<{ path: string; content: string }> {
+  const name = path.posix.basename(file).replace(/\.(tsx|jsx)$/, "");
+  if (!name || name === "index") return [];
+  let listed = "";
+  try {
+    listed = execFileSync("git", ["grep", "-l", "-F", "-e", name, head, "--", "*.tsx", "*.jsx"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 4 * 1024 * 1024,
+    });
+  } catch {
+    return []; // no match (git grep exits 1)
+  }
+  const usages: Array<{ path: string; content: string }> = [];
+  for (const line of listed.split("\n")) {
+    const candidate = line.slice(line.indexOf(":") + 1).trim();
+    if (!candidate || candidate === file || usages.length >= 2) continue;
+    let content = "";
+    try {
+      content = execFileSync("git", ["show", `${head}:${candidate}`], { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    } catch {
+      continue;
+    }
+    if (content.length < 12_000 && importsFile(candidate, content, file)) usages.push({ path: candidate, content });
+  }
+  return usages;
+}
+
 /**
  * Changed files that another changed file imports are shown in context by that file's scene
  * (a new <BillingToggle> inside the pricing card it was added to), so they get no scene of
@@ -126,6 +171,7 @@ export async function renderFeatureRecVideo(input: {
     caption: source.caption,
     before: source.before,
     after: source.after,
+    usages: input.revisions ? findUsages(input.repoRoot, input.revisions.head, source.file) : undefined,
   }));
 
   const ok: Feature[] = [];

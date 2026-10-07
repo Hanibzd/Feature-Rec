@@ -48,19 +48,20 @@ FIDELITY
 - Custom Tailwind tokens of the target repo: see THEME in the request.
 - Imported child components without source (Button, Card, Dialog, Input...): rebuild them plainly
   from their name, props and the tokens (shadcn/ui conventions if the path says so).
-- Small components (avatar, badge, icon, chip, single button) are shown ALONE, centered: 2-4
-  instances side by side with realistic props covering the states the change affects (e.g. with
-  and without an image). Never invent a header, sidebar, list or page around them.
-- Lay the UI out as it sits on its page, at a realistic size (viewport 1440px wide). Render ONLY
-  the changed component (and the dialog/menu it opens). Its surround is the plain page
-  background: no empty boxes, cards, hero sections, skeleton lines or sample page content.
+- Small components (avatar, badge, icon, chip, single button): with WHERE IT IS USED, show them in
+  that real context; without it, show them alone, centered, 2-4 instances with realistic props
+  covering the states the change affects. Never invent a header, sidebar, list or page around them.
+- Lay the UI out as it sits on its page, at a realistic size (viewport 1440px wide). Render the
+  changed component (and the dialog/menu it opens) and, when WHERE IT IS USED is given, the
+  immediate surroundings that code gives it (the heading, labels and container that frame it),
+  reproduced statically from that code so the viewer recognises the screen. Nothing else: no
+  invented boxes, cards, hero sections, skeleton lines, navigation or sample page content.
 - Exception, page chrome (header, nav bar, footer, sidebar): ONE <PageHint /> goes where the page
   content sits (below a header, above a footer, beside a sidebar), OUTSIDE the data-focus="ui"
   element, so the viewer understands what the component is (the Stage adds one under wide chrome
   if you forget). Nothing else.
-- Wide components (headers, nav bars, toolbars) read small at overview size: always add a
-  focus moment on the changed part so the Stage can bring it to a readable size. With several
-  changes in one component, focus each one in turn (~40 frames each).
+- The Stage always keeps the whole component in frame (wide chrome is framed edge to edge) and
+  only nudges toward small focused or clicked parts: never try to zoom or crop with layout.
 
 SCREEN, NOT PAGE BOX
 - The Stage background IS the page background: set it to the page color and never paint a
@@ -85,7 +86,8 @@ const KIT_DOC = `SCENE KIT — import { Stage, Reveal, Swap, Typewriter, Modal, 
   pointer?: { path: { frame: number; to: Target }[]; clicks?: number[] }
      Target = a data-focus id (string), { text: "exact visible text" }, { selector: "css" }, or a
      screen point { x, y } in the 1920x1080 frame (for the resting position). The pointer lands on
-     the target's center. Moves are eased; keep 20-30 frames per move.
+     the target's center. Moves are eased; keep 20-30 frames per move. The Stage leans in slightly
+     on each click by itself: no focus moment needed for a clicked control.
      Add data-cursor="text" on a text field's data-focus element to show an I-beam over it.
   background: the page background implied by the UI.  fontFamily={fontFamily} unless told otherwise.
   viewportWidth?: layout width, default 1440.
@@ -156,12 +158,12 @@ ${real.importLines}
       : ""
   }.
 - Targets inside them (pointer AND focus): { text: "exact visible text" } or { selector: "css" },
-  e.g. focus={[{ from: 50, text: "Start free trial" }]}. NEVER add invisible anchor elements or
+  e.g. focus={[{ from: 50, text: "Save changes" }]}. NEVER add invisible anchor elements or
   guess coordinates: the Stage measures the real elements.
   Pointer clicks are REAL: at each click frame the Stage clicks the targeted element, so the
   component runs its own onClick/state and its own CSS transitions. A click that changes nothing
   fails the render. To show how a new control works, move the pointer to it and click the element
-  that changes its state (e.g. a period switch defaulting to "Monthly": click "Annual") (a toggle without text: { selector: "button[aria-pressed]" }
+  that changes its state (a toggle without text: { selector: "button[aria-pressed]" }
   or a similar attribute selector from the code). Never fake a state by redrawing the component.
   Hover-only styles cannot be shown. Do not click links that would navigate away.
   Passive content (text, panel, badge) needs no pointer.
@@ -203,7 +205,13 @@ AFTER:
 \`\`\`tsx
 ${feature.after}
 \`\`\`
-${opts.real ? `\n${realSection(opts.real)}\n` : ""}${
+${
+    feature.usages?.length
+      ? `\nWHERE IT IS USED (real code at the PR head; frame the component with these surroundings, keep it the focus):\n${feature.usages
+          .map((u) => `--- ${u.path}\n\`\`\`tsx\n${u.content}\n\`\`\``)
+          .join("\n")}\n`
+      : ""
+  }${opts.real ? `\n${realSection(opts.real)}\n` : ""}${
     !opts.real && opts.localImports?.length
       ? `\nLOCAL IMPORTS of the changed file (AFTER), to rebuild the pieces the diff does not show (their markup,\nclassNames and styles, CSS modules included — translate module classes to equivalent inline styles):\n${opts.localImports
           .map((f) => `--- ${f.path}\n\`\`\`\n${f.content}\n\`\`\``)
@@ -212,7 +220,7 @@ ${opts.real ? `\n${realSection(opts.real)}\n` : ""}${
   }
 Answer in two parts:
 1. PLAN — at most 7 short bullets: what changed (every visible delta), how a user would use it,
-   page chrome? (yes → PageHint + a focus moment per change), the beats with frame numbers.
+   page chrome? (yes → PageHint), the beats with frame numbers.
 2. CODE — one \`\`\`tsx block with the complete scene file. Nothing after it.`;
   return { system: SYSTEM_PROMPT, cached: KIT_DOC, request };
 }

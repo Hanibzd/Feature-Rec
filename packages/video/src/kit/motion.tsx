@@ -51,6 +51,15 @@ export const Reveal: React.FC<{
  * Same element, before → after, in place: both versions share one grid cell so
  * nothing jumps and no text is ever duplicated side by side.
  */
+/**
+ * Opacities [outgoing, incoming] of a cross-fade at progress p. The outgoing state is mostly gone
+ * before the incoming one shows, so two different texts are never readable on top of each other.
+ */
+export function staggered(p: number): [number, number] {
+  const clamp = (v: number) => Math.min(1, Math.max(0, v));
+  return [1 - clamp(p / 0.6), clamp((p - 0.4) / 0.6)];
+}
+
 export const Swap: React.FC<{
   at: number;
   duration?: number;
@@ -59,10 +68,11 @@ export const Swap: React.FC<{
   inline?: boolean;
 }> = ({ at, duration = 12, before, after, inline = true }) => {
   const p = useProgress(at, duration);
+  const [out, into] = staggered(p);
   return (
     <div style={{ display: inline ? "inline-grid" : "grid", verticalAlign: "middle" }}>
-      <div style={{ gridArea: "1 / 1", opacity: 1 - p, justifySelf: "start", alignSelf: "center" }}>{before}</div>
-      <div style={{ gridArea: "1 / 1", opacity: p, justifySelf: "start", alignSelf: "center" }}>{after}</div>
+      <div style={{ gridArea: "1 / 1", opacity: out, justifySelf: "start", alignSelf: "center" }}>{before}</div>
+      <div style={{ gridArea: "1 / 1", opacity: into, justifySelf: "start", alignSelf: "center" }}>{after}</div>
     </div>
   );
 };

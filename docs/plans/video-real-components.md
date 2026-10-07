@@ -64,13 +64,24 @@ prompt cache.
   scene invented a dashboard header around the avatar. These runs led to type-only import
   elision, Next routing stubs, the alias fix for in-context files and the caption guard.
 
+- **Held-out check** (commits never used while tuning: taxonomy pricing page and sign-in toast,
+  precedent nav bar and home card; test-repo PRs replayed locally, the billing toggle three
+  times). Review of these videos led to general fixes rather than per-case ones: the component's
+  importers at the PR head are given as context (WHERE IT IS USED) instead of inventing
+  surroundings; the camera never crops the component (wide chrome framed edge to edge, clicks and
+  focus lean in at most to 90% of the frame); `PageHint` renders inside flex layouts; cross-fades
+  are staggered so two texts never overlap; the default text color follows the page background;
+  a scene whose pointer and focus only visit elements the diff leaves untouched is sent back to
+  the model (`assertTargetsTheChange`).
+
 ## Open issues
 
 - shadcn codebases mostly fall back to reconstruction because their primitives import Radix UI.
   Shipping the non-portal Radix primitives (slot, avatar, label, separator, switch, checkbox, tabs,
   …) would cover many of them; portal-based ones (dialog, popover, dropdown, tooltip, select)
   also need their portals routed into the Stage overlay.
-- Reconstruction of very small components (an avatar) tends to invent surrounding UI.
+- Reconstruction of very small components without importers in the repository (no WHERE IT IS
+  USED context) shows them alone; their page context is not recovered.
 
 - Real mode cannot show `hover:` styles or replay typing into real inputs (clicks only).
 - Components that need providers (router, data fetching, i18n) or packages the renderer does not

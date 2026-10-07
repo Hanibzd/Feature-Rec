@@ -39,6 +39,31 @@ export function assertNoCaptions(code: string, sources: string): void {
   }
 }
 
+/**
+ * The video has to show what the PR changes. Rejects a scene whose pointer and focus moments only
+ * visit elements the diff leaves untouched: every text target is found, with the lines just
+ * around it, unchanged in the BEFORE source. A target missing from BEFORE is new (or lives in
+ * another file of the PR) and counts as the change. Ids and selectors cannot be judged: allowed.
+ */
+export function assertTargetsTheChange(code: string, before: string, after: string): void {
+  const targets = [...new Set([...code.matchAll(/\btext:\s*(["'`])([^"'`\n]+)\1/g)].map((m) => m[2]))];
+  if (targets.length === 0 || before.trim() === "") return;
+  const norm = (lines: string[]) => lines.map((l) => l.trim()).filter(Boolean).join("\n");
+  const beforeText = norm(before.split("\n"));
+  const afterLines = after.split("\n");
+  const unchanged = (text: string) => {
+    if (!before.includes(text)) return false;
+    const at = afterLines.flatMap((l, i) => (l.includes(text) ? [i] : []));
+    return at.length > 0 && at.every((i) => beforeText.includes(norm(afterLines.slice(Math.max(0, i - 1), i + 2))));
+  };
+  if (targets.every(unchanged)) {
+    throw new Error(
+      `The pointer and focus only visit elements this PR does not change (${targets.map((t) => `"${t}"`).join(", ")}). ` +
+        `Point at what the PR adds or changes (and click it if it is interactive), or use no pointer for a passive change.`,
+    );
+  }
+}
+
 /** Generation attempts per scene: the first answer plus one repair with the error fed back. */
 const ATTEMPTS = 2;
 
@@ -49,6 +74,7 @@ type Session = {
   cached: string;
   turns: Turn[];
   real: RealComponents | null;
+  before: string;
   after: string;
   /** all source text the scene may legitimately display (before, after, local imports) */
   sources: string;
@@ -82,6 +108,7 @@ async function generate(session: Session, attempts: number): Promise<void> {
       const code = validateScene(extractCodeBlock(raw));
       if (session.real) assertNoRetyping(code, session.after);
       assertNoCaptions(code, session.sources);
+      assertTargetsTheChange(code, session.before, session.after);
       writeSceneFile(session.id, code);
       const typeErrors = typecheckScene(session.id);
       if (typeErrors.length === 0) return;
@@ -130,8 +157,9 @@ export async function replicate(
       cached: prompt.cached,
       turns: [{ role: "user", content: prompt.request }],
       real,
+      before: feature.before,
       after: feature.after,
-      sources: [feature.before, feature.after, ...localImports.map((f) => f.content)].join("\n"),
+      sources: [feature.before, feature.after, ...localImports.map((f) => f.content), ...(feature.usages ?? []).map((u) => u.content)].join("\n"),
     };
     sessions.set(feature.id, session);
     try {

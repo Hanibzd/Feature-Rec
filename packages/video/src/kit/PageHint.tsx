@@ -14,7 +14,7 @@ export const PageHint: React.FC<{
   /** Space between the chrome and the block. */
   gap?: number;
 }> = ({ tone = "light", height = 520, maxWidth = 1152, gap = 32 }) => (
-  <div data-page-hint="" style={{ maxWidth, margin: `${gap}px auto 0`, padding: "0 24px" }}>
+  <div data-page-hint="" style={{ width: "100%", boxSizing: "border-box", maxWidth, margin: `${gap}px auto 0`, padding: "0 24px" }}>
     <div
       style={{
         height,

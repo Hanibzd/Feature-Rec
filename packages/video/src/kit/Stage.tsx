@@ -56,8 +56,29 @@ const CAMERA = { damping: 200, stiffness: 40, mass: 1 } as const;
 const OVERVIEW_FILL = 0.84;
 const MAX_OVERVIEW_SCALE = 1.8;
 const MAX_NUDGE = 1.25;
-/** Scale at which typical 14px UI text reads comfortably on a phone. */
-const LEGIBLE_SCALE = 1.6;
+/** Minimum lean-in toward a clicked control (relative to the overview). */
+const CLICK_NUDGE = 1.15;
+/** Wide chrome (headers, toolbars) fills more of the frame: it is short, so width is the limit. */
+const WIDE_OVERVIEW_FILL = 0.94;
+/** No framing ever crops the component: a lean-in stops when it fills this much of the frame. */
+const MAX_FILL = 0.9;
+
+/** Relative luminance of a #rgb / #rrggbb / rgb() color; light (1) when unknown. */
+function luminance(color: string): number {
+  const c = color.trim();
+  let rgb: number[] | null = null;
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(c)?.[1];
+  if (hex) {
+    const full = hex.length === 3 ? [...hex].map((h) => h + h).join("") : hex;
+    rgb = [0, 2, 4].map((i) => parseInt(full.slice(i, i + 2), 16));
+  } else {
+    const m = /^rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/i.exec(c);
+    if (m) rgb = [m[1], m[2], m[3]].map(Number);
+  }
+  if (!rgb) return 1;
+  const [r, g, b] = rgb.map((v) => v / 255);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
 
 const same = (a: Record<string, Rect>, b: Record<string, Rect>) =>
   Object.keys(a).length === Object.keys(b).length &&
@@ -281,9 +302,9 @@ export const Stage: React.FC<{
   const current = rectOf("ui");
   const ui: Rect = { ...current, h: current.h + (rects.__pending?.h ?? 0) }; // final size of the UI
   const fitUi = (fill: number) => Math.min((width * fill) / Math.max(ui.w, 1), (height * fill) / Math.max(ui.h, 1));
-  const overview = Math.min(fitUi(OVERVIEW_FILL), MAX_OVERVIEW_SCALE);
-  // Headers and toolbars: too wide to be readable whole, so a focus may crop them.
+  // Headers and toolbars (wide and short) are framed as wide as possible.
   const wide = ui.w / Math.max(ui.h, 1) > 5;
+  const overview = Math.min(fitUi(wide ? WIDE_OVERVIEW_FILL : OVERVIEW_FILL), MAX_OVERVIEW_SCALE);
   // Page chrome (a header, toolbar or footer: wide and short) reads as such only with the page it
   // frames. When the scene did not add a <PageHint>, the Stage adds the same quiet block: below
   // chrome at the top of the layout, above it otherwise.
@@ -292,12 +313,7 @@ export const Stage: React.FC<{
       ? (() => {
           const w = Math.min(ui.w - 48, 1152);
           const below = ui.y < 400;
-          const lum = (() => {
-            const hex = /^#([0-9a-f]{6})$/i.exec(background.trim())?.[1];
-            if (!hex) return 1;
-            const [r, g, b] = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
-            return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-          })();
+          const lum = luminance(background);
           return {
             left: ui.x + (ui.w - w) / 2,
             top: below ? ui.y + ui.h + 32 : ui.y - 32 - 520,
@@ -308,7 +324,7 @@ export const Stage: React.FC<{
         })()
       : null;
 
-  const framing = (requested: string) => {
+  const framing = (requested: string, click = false) => {
     // A modal or toast is drawn in screen space, already in view at the UI's scale: focusing it
     // would make the camera chase a target that moves with the camera. Keep the UI framing.
     const id = rects[`overlay:${requested}`] ? "ui" : requested;
@@ -316,15 +332,10 @@ export const Stage: React.FC<{
     // Nudge only when the element is small on screen at overview size.
     const onScreen = Math.min(r.h * overview, (r.w * overview) / 3);
     const nudge = interpolate(onScreen, [36, 110], [MAX_NUDGE, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
-    // Wide UIs (headers, toolbars) end up at a small overview scale: when focusing one of
-    // their parts, still reach a readable size, but never more than 1.6x the overview.
-    // Everything else: the whole component always stays in frame.
-    const s =
-      id === "ui"
-        ? overview
-        : wide
-          ? Math.max(overview * nudge, Math.min(LEGIBLE_SCALE, overview * 1.6))
-          : Math.max(overview, Math.min(overview * nudge, fitUi(0.9)));
+    // The whole component always stays in frame: a small target gets a light nudge, a click a
+    // light lean-in (+15-25%) so its effect reads on a phone, both capped before anything crops.
+    const lean = click ? Math.max(nudge, CLICK_NUDGE) : nudge;
+    const s = id === "ui" ? overview : Math.max(overview, Math.min(overview * lean, fitUi(MAX_FILL)));
     const halfW = width / (2 * s);
     const halfH = height / (2 * s);
     const axis = (c: number, lo: number, hi: number, half: number) =>
@@ -340,23 +351,23 @@ export const Stage: React.FC<{
     };
   };
 
-  // Wide UIs without explicit focus: follow what the pointer goes to, so the part being
-  // used becomes readable (the camera starts moving when the pointer does).
   let moments = focus.flatMap((m) => { const k = keyOf(m); return k ? [{ from: m.from, id: k }] : []; });
-  if (moments.length === 0 && wide && pointer) {
-    const path = [...pointer.path].sort((a, b) => a.frame - b.frame);
-    moments = path.flatMap((p, i) => {
-      const k = keyOf(p.to);
-      return k && (i === 0 || keyOf(path[i - 1].to) !== k)
-        ? [{ from: i > 0 ? path[i - 1].frame : Math.max(0, p.frame - 20), id: k }]
-        : [];
-    });
-  }
-  const shots = [{ from: 0, id: "ui" }, ...moments].sort((a, b) => a.from - b.from);
+  // Every click gets a light lean-in toward the clicked control, starting just before the
+  // press, so what the click changes (usually right next to it) is readable. Model-declared
+  // focus moments on the same target around the same time are replaced by it.
+  const clickMoments = (pointer?.clicks ?? []).flatMap((c) => {
+    const target = [...(pointer?.path ?? [])].sort((a, b) => a.frame - b.frame).reverse().find((w) => w.frame <= c)?.to;
+    const k = target === undefined ? null : keyOf(target);
+    return k ? [{ from: Math.max(0, c - 12), id: k, click: true }] : [];
+  });
+  moments = moments.filter((m) => !clickMoments.some((c) => c.id === m.id && Math.abs(c.from - m.from) < 30));
+  const shots: Array<{ from: number; id: string; click?: boolean }> = [{ from: 0, id: "ui" }, ...moments, ...clickMoments].sort(
+    (a, b) => a.from - b.from,
+  );
   let cam = framing(shots[0].id);
   for (let i = 1; i < shots.length; i++) {
-    const a = framing(shots[i - 1].id);
-    const b = framing(shots[i].id);
+    const a = framing(shots[i - 1].id, shots[i - 1].click);
+    const b = framing(shots[i].id, shots[i].click);
     const p = spring({ frame: frame - shots[i].from, fps, config: CAMERA });
     cam = { ls: cam.ls + (b.ls - a.ls) * p, cx: cam.cx + (b.cx - a.cx) * p, cy: cam.cy + (b.cy - a.cy) * p };
   }
@@ -406,7 +417,12 @@ export const Stage: React.FC<{
   });
 
   return (
-    <AbsoluteFill data-fr-freeze="" style={{ background, fontFamily, overflow: "hidden" }}>
+    // Default text color like a browser on that page: dark on light backgrounds, light on dark
+    // ones (components that set no color, e.g. a bare <h1>, must not vanish).
+    <AbsoluteFill
+      data-fr-freeze=""
+      style={{ background, fontFamily, overflow: "hidden", color: luminance(background) < 0.4 ? "#f8fafc" : "#0a0a0a" }}
+    >
       <div
         ref={rootRef}
         // replayed clicks must never navigate or submit the page

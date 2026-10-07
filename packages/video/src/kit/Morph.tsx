@@ -1,5 +1,5 @@
 import React, { useLayoutEffect, useRef } from "react";
-import { useProgress } from "./motion";
+import { staggered, useProgress } from "./motion";
 import { restoreInline, setInline, type InlineBackup } from "./transitions";
 
 /**
@@ -123,8 +123,9 @@ export const Morph: React.FC<{
     if (!plan) {
       // Fallback: plain cross-fade between the two real components.
       set(ghost, "visibility", "visible");
-      set(ghost, "opacity", String(1 - p));
-      set(root, "opacity", String(p));
+      const [out, into] = staggered(p);
+      set(ghost, "opacity", String(out));
+      set(root, "opacity", String(into));
       return;
     }
     const kebab = (s: string) => s.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);

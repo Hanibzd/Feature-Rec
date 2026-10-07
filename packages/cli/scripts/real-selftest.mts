@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { assertNoRetyping, localImportSources, prepareRealComponents, type RevisionReader } from "../src/agent/real.ts";
 import { globalVariables, loadTailwindConfig, themeDeclarations } from "../src/agent/theme.ts";
-import { assertNoCaptions } from "../src/agent/index.ts";
+import { assertNoCaptions, assertTargetsTheChange } from "../src/agent/index.ts";
 import { withoutComponentsShownInContext } from "../src/feature-rec.ts";
 import { GENERATED_DIR } from "../src/paths.ts";
 
@@ -194,6 +194,20 @@ const rejects = (code: string, sources = "") => {
     return true;
   }
 };
+const offTarget = (code: string, before: string, after: string) => {
+  try {
+    assertTargetsTheChange(code, before, after);
+    return false;
+  } catch {
+    return true;
+  }
+};
+const cardBefore = `<section>\n  <h2>Starter</h2>\n  <div>\n    <p className="font-semibold">Switch to annual</p>\n  </div>\n  <button className="bg-slate-900">\n    Get started\n  </button>\n</section>`;
+const cardAfter = cardBefore.replace("<h2>Starter</h2>", "<h2>Starter</h2>\n  <BillingToggle />").replace("bg-slate-900", "bg-brand-600");
+ok("target guard rejects a pointer that only visits untouched elements", offTarget(`path: [{ frame: 60, to: { text: "Switch to annual" } }]`, cardBefore, cardAfter));
+ok("target guard accepts text from a new file of the PR", !offTarget(`path: [{ frame: 75, to: { text: "Annual" } }], clicks: [78]`, cardBefore, cardAfter));
+ok("target guard accepts an element whose style changed", !offTarget(`focus={[{ from: 50, text: "Get started" }]}`, cardBefore, cardAfter));
+ok("target guard ignores new components and data-focus ids", !offTarget(`path: [{ frame: 60, to: "signin-btn" }]`, "", cardAfter));
 ok("caption guard rejects before/after labels", rejects(`<p className="text-xs">After: avatar image with object-cover</p>`));
 ok("caption guard rejects code shown as text", rejects(`<code>{'className={cn("object-cover", className)}'}</code>`));
 ok("caption guard accepts Tailwind before:/after: variants", !rejects(`<span className="after:content-[''] before:absolute" />`));

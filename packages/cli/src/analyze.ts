@@ -15,6 +15,8 @@ export type Feature = {
   caption: string;
   before: string;
   after: string;
+  /** Files (at the PR head) that render this component: its real surroundings. */
+  usages?: Array<{ path: string; content: string }>;
 };
 
 /** Project design tokens injected into the replication agent. */
