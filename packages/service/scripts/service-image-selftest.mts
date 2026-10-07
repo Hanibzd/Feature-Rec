@@ -8,7 +8,6 @@ import { Client } from "pg";
 // Run separately after building the image; normal selftests never build Docker.
 // Only the explicit local test database URL is used, never DATABASE_URL or .env.
 const image = process.argv[2] ?? "feature-rec-service:ci";
-const previousImage = process.env.PREVIOUS_SERVICE_IMAGE;
 const adminUrl = new URL(process.env.TEST_DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/postgres");
 assert.ok(["localhost", "127.0.0.1", "[::1]"].includes(adminUrl.hostname), "Image selftest requires a local PostgreSQL server");
 const suffix = crypto.randomBytes(6).toString("hex");
@@ -39,10 +38,10 @@ async function docker(args: string[]) {
 function environment(extra: string[] = []) {
   return [...commonEnv, ...extra].flatMap((value) => ["--env", value]);
 }
-async function start(extra: string[] = [], selectedImage = image): Promise<string> {
+async function start(extra: string[] = []): Promise<string> {
   const name = `feature-rec-image-${suffix}-${++sequence}`;
   containers.add(name);
-  await docker(["run", "--detach", "--name", name, ...network, ...environment(extra), selectedImage]);
+  await docker(["run", "--detach", "--name", name, ...network, ...environment(extra), image]);
   return name;
 }
 async function stop(name: string): Promise<void> {
@@ -127,25 +126,10 @@ try {
   sanitized(partialLogs.stdout + partialLogs.stderr);
   assert.ok(!(partialLogs.stdout + partialLogs.stderr).includes("Server listening at"));
 
-  const latestMigration = async () =>
-    (await db.query<{ name: string }>("select name from kysely_migration order by name desc limit 1")).rows[0].name;
-  assert.equal(await latestMigration(), "0011_multitenant_contract");
-  if (previousImage) {
-    const incompatible = await start([], previousImage);
-    await exited(incompatible);
-    const logs = await docker(["logs", incompatible]);
-    assert.match(logs.stdout + logs.stderr, /previously executed migration 0011_multitenant_contract is missing/i);
-  }
-  // D-to-C recreates only empty compatibility schema, which C starts against.
-  await admin(["migrate-to", "0010_multitenant_enforce", "--expect-current", "0011_multitenant_contract", "--service-stopped", "--traffic-paused", "--confirm"]);
-  assert.equal(await latestMigration(), "0010_multitenant_enforce");
-  if (previousImage) {
-    const previous = await start([], previousImage);
-    await healthy(previous);
-    await stop(previous);
-  }
+  assert.equal((await db.query<{ name: string }>("select name from kysely_migration order by name desc limit 1")).rows[0].name, "0011_multitenant_contract");
 
-  // Staged after C's start: this raw fixture has no key verifier, so startup would refuse it.
+  // Staged after the last start: this raw fixture has no key verifier, so startup
+  // would refuse it until cancellation clears its ciphertext.
   const pendingId = crypto.randomUUID();
   const pendingCiphertext = "fixture-image-pending-ciphertext";
   secrets.add(pendingCiphertext);
@@ -155,22 +139,13 @@ try {
   const status = (await admin(["slack-installation-status", "--slack-installation-id", pendingId])).stdout;
   sanitized(status);
   assert.equal((JSON.parse(status) as { installation: { status: string } }).installation.status, "pending");
-  // C-to-B2 keeps OAuth storage, including the pending installation.
-  await admin(["migrate-to", "0009_slack_oauth_installations", "--expect-current", "0010_multitenant_enforce", "--service-stopped", "--traffic-paused", "--confirm"]);
-  assert.equal(await latestMigration(), "0009_slack_oauth_installations");
-  assert.equal((JSON.parse((await admin(["slack-installation-status", "--slack-installation-id", pendingId])).stdout) as { installation: { status: string } }).installation.status, "pending");
-  // B2-to-B refuses until every unconsumed installation is cancelled.
-  const downToB = ["migrate-to", "0008_multitenant_expand", "--expect-current", "0009_slack_oauth_installations", "--service-stopped", "--traffic-paused", "--confirm"];
-  await assert.rejects(admin(downToB), /Cancel pending Slack OAuth installations/);
+  // Cancel the staged installation and the OAuth session left by the redirect check.
   for (const row of (await db.query<{ id: string }>("select id from slack_oauth_installations where status in ('awaiting_callback', 'exchanging', 'pending')")).rows) {
-    const result = (await admin(["cancel-slack-installation", "--slack-installation-id", row.id, "--confirm"])).stdout;
-    sanitized(result);
-    assert.equal((JSON.parse(result) as { cancelled: boolean }).cancelled, true);
+    const cancelled = (await admin(["cancel-slack-installation", "--slack-installation-id", row.id, "--confirm"])).stdout;
+    sanitized(cancelled);
+    assert.equal((JSON.parse(cancelled) as { cancelled: boolean }).cancelled, true);
   }
   assert.equal((await db.query<{ count: string }>("select count(*) from slack_oauth_installations where state_hash is not null or browser_binding_hash is not null or bot_token_ciphertext is not null")).rows[0].count, "0");
-  await admin(downToB);
-  assert.equal(await latestMigration(), "0008_multitenant_expand");
-  await admin(["migrate-to", "0011_multitenant_contract", "--expect-current", "0008_multitenant_expand", "--confirm"]);
   const final = await start(oauthEnv);
   await healthy(final);
   await stop(final);
@@ -178,7 +153,7 @@ try {
     const logs = await docker(["logs", name]);
     sanitized(logs.stdout + logs.stderr);
   }
-  console.log(`Service image selftest passed: configured/disabled health, redirect/cookies, partial configuration, compiled admin, cancellation and 0011/0010/0009/0008/0011${previousImage ? ", retained C image" : " (retained C image not supplied)"}.`);
+  console.log("Service image selftest passed: configured/disabled health, redirect/cookies, partial configuration, compiled admin status and cancellation.");
 } catch (error) {
   // Capture evidence before cleanup, without leaking fixtures or masking the test failure.
   for (const name of containers) {

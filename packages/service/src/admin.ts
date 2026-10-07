@@ -34,8 +34,8 @@ Usage:
 
 Run production commands inside Railway with:
   railway ssh -- node dist/admin.js <subcommand> ...
-For schema downgrades, stop the service first and run the retained admin artifact
-from a separate maintenance process. Do not downgrade from a live service shell.
+For schema downgrades, stop the service first and run the newer release's admin
+command from a separate maintenance process. Do not downgrade from a live service shell.
 `;
 
 function flag(args: ParsedArgs, name: string): string | undefined {
