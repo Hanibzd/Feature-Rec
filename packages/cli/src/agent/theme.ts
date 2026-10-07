@@ -1,7 +1,8 @@
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
-import { VIDEO_SRC } from "../paths";
+import ts from "typescript";
+import { VIDEO_DIR, VIDEO_SRC } from "../paths";
 
 /**
  * The target repository's Tailwind theme, made available to the renderer.
@@ -10,8 +11,8 @@ import { VIDEO_SRC } from "../paths";
  * `bg-brand-600`, `rounded-card` or shadcn's `text-muted-foreground` produce no CSS. This module
  * turns the target's tailwind.config (v3 style) into v4 `@theme` variables, and carries over the
  * CSS custom properties its globals define (`:root`, `.dark`) plus any v4 `@theme` blocks.
- * Values are sanitized: a bad theme must never break the render (the caller also retries
- * without it).
+ * The config is read statically, never executed. Values are sanitized: a bad theme must
+ * never break the render (the caller also retries without it).
  */
 
 export const TARGET_THEME_FILE = path.join(VIDEO_SRC, "target-theme.css");
@@ -87,27 +88,152 @@ export function globalVariables(css: string): string {
   return blocks.join("\n\n");
 }
 
+const trusted = createRequire(path.join(VIDEO_DIR, "package.json"));
+/** Tailwind's own helpers, loaded from the renderer's installation (never from the target repo). */
+const TRUSTED_MODULES: Record<string, () => unknown> = {
+  "tailwindcss/colors": () => trusted("tailwindcss/colors") as unknown,
+  "tailwindcss/defaultTheme": () => trusted("tailwindcss/defaultTheme") as unknown,
+  "tailwindcss/default-theme": () => trusted("tailwindcss/defaultTheme") as unknown,
+};
+const unwrapDefault = (m: unknown) => (m && typeof m === "object" && "default" in m ? (m as { default: unknown }).default : m);
+
+type ModuleValue = { default: unknown; named: Map<string, unknown> };
+
 /**
- * Load a tailwind.config.{ts,js,mjs,cjs}. Plugins are not executed (their packages are not
- * installed here): the `plugins` array and non-relative imports other than tailwindcss are
- * stripped from a temporary copy written next to the original, so relative imports still work.
+ * Statically evaluate a config module: object/array/string/number literals, spreads, `const`
+ * bindings, member access, relative imports (parsed the same way) and Tailwind's own helpers.
+ * Anything else — calls, functions, plugins — evaluates to undefined. The target repository's
+ * code is never executed: the action process holds secrets (API key, OIDC token, git creds).
  */
+function evaluateModule(file: string, depth = 0): ModuleValue {
+  const text = fs.readFileSync(file, "utf8");
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+  const bindings = new Map<string, () => unknown>();
+  const cache = new Map<string, unknown>();
+  const resolving = new Set<string>();
+  const result: ModuleValue = { default: undefined, named: new Map() };
+
+  const load = (spec: string): unknown => {
+    if (TRUSTED_MODULES[spec]) return TRUSTED_MODULES[spec]();
+    if (!spec.startsWith(".") || depth >= 3) return undefined;
+    const base = path.resolve(path.dirname(file), spec);
+    const target = [base, ...[".ts", ".js", ".mjs", ".cjs", "/index.ts", "/index.js"].map((e) => base + e)].find(
+      (f) => fs.existsSync(f) && fs.statSync(f).isFile(),
+    );
+    if (!target) return undefined;
+    const mod = evaluateModule(target, depth + 1);
+    return { default: mod.default, ...Object.fromEntries(mod.named) };
+  };
+  const lookup = (name: string): unknown => {
+    if (cache.has(name)) return cache.get(name);
+    const get = bindings.get(name);
+    if (!get || resolving.has(name)) return undefined;
+    resolving.add(name);
+    const value = get();
+    resolving.delete(name);
+    cache.set(name, value);
+    return value;
+  };
+  const propName = (n: ts.PropertyName): string | undefined =>
+    ts.isIdentifier(n) || ts.isStringLiteral(n) || ts.isNumericLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) ? n.text : undefined;
+
+  const evaluate = (node: ts.Node): unknown => {
+    if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node) || ts.isNonNullExpression(node) || ts.isTypeAssertionExpression(node))
+      return evaluate(node.expression);
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+    if (ts.isNumericLiteral(node)) return Number(node.text);
+    if (node.kind === ts.SyntaxKind.TrueKeyword) return true;
+    if (node.kind === ts.SyntaxKind.FalseKeyword) return false;
+    if (ts.isIdentifier(node)) return lookup(node.text);
+    if (ts.isArrayLiteralExpression(node)) {
+      return node.elements.flatMap((el) => {
+        if (ts.isSpreadElement(el)) {
+          const v = evaluate(el.expression);
+          return Array.isArray(v) ? v : [];
+        }
+        return [evaluate(el)];
+      });
+    }
+    if (ts.isObjectLiteralExpression(node)) {
+      const out: Record<string, unknown> = {};
+      for (const prop of node.properties) {
+        if (ts.isPropertyAssignment(prop)) {
+          const key = propName(prop.name);
+          if (key !== undefined) out[key] = evaluate(prop.initializer);
+        } else if (ts.isShorthandPropertyAssignment(prop)) out[prop.name.text] = lookup(prop.name.text);
+        else if (ts.isSpreadAssignment(prop)) {
+          const v = evaluate(prop.expression);
+          if (v && typeof v === "object") Object.assign(out, v);
+        }
+      }
+      return out;
+    }
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const obj = evaluate(node.expression);
+      const key = ts.isPropertyAccessExpression(node)
+        ? node.name.text
+        : ts.isStringLiteral(node.argumentExpression) || ts.isNumericLiteral(node.argumentExpression)
+          ? node.argumentExpression.text
+          : undefined;
+      return obj && typeof obj === "object" && key !== undefined ? (obj as Record<string, unknown>)[key] : undefined;
+    }
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "require") {
+      const arg = node.arguments[0];
+      return arg && ts.isStringLiteral(arg) ? load(arg.text) : undefined;
+    }
+    return undefined; // calls, functions, operators: not evaluated
+  };
+
+  for (const stmt of source.statements) {
+    if (ts.isImportDeclaration(stmt) && ts.isStringLiteral(stmt.moduleSpecifier) && stmt.importClause && !stmt.importClause.isTypeOnly) {
+      const spec = stmt.moduleSpecifier.text;
+      const clause = stmt.importClause;
+      if (clause.name) bindings.set(clause.name.text, () => unwrapDefault(load(spec)));
+      const nb = clause.namedBindings;
+      if (nb && ts.isNamespaceImport(nb)) bindings.set(nb.name.text, () => load(spec));
+      if (nb && ts.isNamedImports(nb)) {
+        for (const el of nb.elements) {
+          const imported = (el.propertyName ?? el.name).text;
+          bindings.set(el.name.text, () => {
+            const mod = load(spec) as Record<string, unknown> | undefined;
+            return mod?.[imported] ?? (unwrapDefault(mod) as Record<string, unknown> | undefined)?.[imported];
+          });
+        }
+      }
+    } else if (ts.isVariableStatement(stmt)) {
+      const exported = stmt.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+      for (const decl of stmt.declarationList.declarations) {
+        if (!ts.isIdentifier(decl.name) || !decl.initializer) continue;
+        const init = decl.initializer;
+        const name = decl.name.text;
+        bindings.set(name, () => evaluate(init));
+        if (exported) result.named.set(name, undefined);
+      }
+    } else if (ts.isExportAssignment(stmt)) {
+      const expr = stmt.expression;
+      bindings.set("__default", () => evaluate(expr));
+    } else if (
+      ts.isExpressionStatement(stmt) &&
+      ts.isBinaryExpression(stmt.expression) &&
+      stmt.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      stmt.expression.left.getText(source) === "module.exports"
+    ) {
+      const right = stmt.expression.right;
+      bindings.set("__default", () => evaluate(right));
+    }
+  }
+  result.default = lookup("__default");
+  for (const name of result.named.keys()) result.named.set(name, lookup(name));
+  return result;
+}
+
+/** Read a tailwind.config.{ts,js,mjs,cjs} without executing it (see evaluateModule). */
 export async function loadTailwindConfig(configPath: string): Promise<{ theme?: ThemeObject } | null> {
-  const source = fs.readFileSync(configPath, "utf8");
-  const sanitized = source
-    .replace(/^\s*import\s+(?!type\b)[^;]*?from\s+["'](?!\.|tailwindcss)[^"']+["'];?\s*$/gm, "")
-    .replace(/require\(\s*["'](?!\.)[^"']+["']\s*\)/g, "undefined")
-    .replace(/plugins\s*:\s*\[[\s\S]*?\]\s*(,?)/, "plugins: []$1");
-  const tmp = path.join(path.dirname(configPath), `.feature-rec-tailwind${path.extname(configPath)}`);
-  fs.writeFileSync(tmp, sanitized);
   try {
-    const mod = (await import(`${pathToFileURL(tmp).href}?t=${Date.now()}`)) as { default?: unknown };
-    const config = (mod.default ?? mod) as { theme?: ThemeObject };
-    return config && typeof config === "object" ? config : null;
+    const config = evaluateModule(configPath).default;
+    return config && typeof config === "object" ? (config as { theme?: ThemeObject }) : null;
   } catch {
     return null;
-  } finally {
-    fs.rmSync(tmp, { force: true });
   }
 }
 

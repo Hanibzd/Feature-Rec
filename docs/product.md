@@ -124,8 +124,8 @@ one of two places:
 - **Reconstruction.** Otherwise the agent rebuilds the UI from the diff.
 
 The repository's Tailwind theme (`tailwind.config` colors, radii, fonts…) and the CSS variables of
-its global stylesheet are injected into the renderer; if the renderer cannot compile them, the video
-is rendered again without them. The target application is never built or launched, but in real mode
+its global stylesheet are injected into the renderer; the config is read statically, never executed.
+If the renderer cannot compile the theme, the video is rendered again without it. The target application is never built or launched, but in real mode
 its component code runs inside the render browser, where network access is blocked (`fetch`, XHR,
 WebSocket, beacons and external images) and rendering is deterministic.
 

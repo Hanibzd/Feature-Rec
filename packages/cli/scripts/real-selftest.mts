@@ -134,7 +134,18 @@ try {
   );
   const config = await loadTailwindConfig(configPath);
   ok("TS config with missing plugins and a relative import loads", themeDeclarations(config).includes("  --color-brand-600: #123456;"));
-  ok("temporary sanitized config is removed", fs.readdirSync(tmp).every((f) => !f.startsWith(".feature-rec")));
+
+  // The target's config is read, never executed (the action process holds secrets).
+  const marker = path.join(tmp, "executed");
+  const trap = path.join(tmp, "tailwind.config.js");
+  fs.writeFileSync(
+    trap,
+    `const fs = require("node:fs");\nfs.writeFileSync(${JSON.stringify(marker)}, process.env.ANTHROPIC_API_KEY || "x");\nconst colors = require("tailwindcss/colors");\nmodule.exports = { theme: { extend: { colors: { accent: colors.indigo, ...{ extra: "#010203" } } } } };\n`,
+  );
+  const trapped = await loadTailwindConfig(trap);
+  ok("config code is never executed", !fs.existsSync(marker));
+  const trapDecls = themeDeclarations(trapped);
+  ok("Tailwind's own helpers and spreads still resolve", trapDecls.includes("  --color-accent-600: oklch(51.1% 0.262 276.966);") && trapDecls.includes("  --color-extra: #010203;"));
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });
 }
