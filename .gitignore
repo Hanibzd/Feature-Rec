@@ -11,3 +11,6 @@ dist/
 *.tsbuildinfo
 feature-rec-testbed/
 .pnpm-store/
+
+# Real-component copies of PR files written next to generated scenes (never commit them)
+packages/video/src/scenes/generated/*/

@@ -8,6 +8,7 @@ import {
   readProjectTokens,
 } from "./analyze";
 import { replicate } from "./agent";
+import { resetTargetTheme } from "./agent/theme";
 import { buildPlan, writePlan } from "./compose";
 import { log } from "./log";
 import { publish } from "./publish";
@@ -24,6 +25,7 @@ function resolveFeatures(opts: GenerateOpts): Feature[] {
 
 async function runGenerate(opts: GenerateOpts): Promise<void> {
   log.banner("Generate scenes from the diff");
+  resetTargetTheme(); // local fixtures and git ranges render with stock Tailwind
   const tokens = readProjectTokens();
 
   const features = resolveFeatures(opts);

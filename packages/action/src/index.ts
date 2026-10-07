@@ -108,6 +108,7 @@ async function main(): Promise<void> {
       repoRoot,
       sources,
       offline: process.env.FEATURE_REC_OFFLINE === "1",
+      revisions: { base: pr.base.sha, head: pr.head.sha },
     });
     await uploadVideo(apiUrl, started.cycleId, video, attemptId);
   } catch (err) {

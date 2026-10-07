@@ -21,6 +21,8 @@ export type Feature = {
 export type ProjectTokens = {
   tailwindConfig: string;
   globalsCss: string;
+  /** Path of the tailwind config file, when it exists on disk (used to load the theme). */
+  tailwindConfigPath?: string;
 };
 
 function readIfExists(p: string): string {
