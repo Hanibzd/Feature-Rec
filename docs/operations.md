@@ -222,9 +222,7 @@ persisted locally.
 Only explicit loopback HTTP base URLs are accepted in development/tests; production requires HTTPS.
 Credentials, query strings, and fragments are rejected. The audience is the normalized base URL,
 with no independent audience override. Discovery/JWKS access is lazy until the first OIDC request,
-so a fresh-database `/health` smoke does not call GitHub or Slack. No runtime path accepts
-`FEATURE_REC_RUNNER_TOKEN`, `SLACK_BOT_TOKEN`, `FEATURE_REC_GITHUB_TOKEN`, or a `GITHUB_TOKEN`
-fallback; these variables are unused if they are still set.
+so a fresh-database `/health` smoke does not call GitHub or Slack.
 
 ## Railway deployment
 

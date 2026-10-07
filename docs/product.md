@@ -1,8 +1,6 @@
 # How Feature-Rec works
 
-This is the canonical description of Feature-Rec's behavior. It covers the current release, after
-the deploy-D contract of the
-[OIDC and multitenancy plan](plans/feature-rec-oidc-multitenancy-plan.md). Procedures live
+This is the canonical description of Feature-Rec's behavior in the current release. Procedures live
 elsewhere: [Onboarding a tenant](tenant-onboarding.md) brings a customer onto the hosted service,
 and [Operations](operations.md) covers the GitHub and Slack apps and running, deploying and rolling
 back the backend.

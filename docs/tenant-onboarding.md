@@ -2,9 +2,7 @@
 
 This procedure brings a new customer (a tenant) onto a hosted Feature-Rec deployment. The customer's
 GitHub and Slack administrators install the apps and add the workflow; the Feature-Rec operator
-pairs and activates the tenant with the compiled admin command. It describes the release after the
-deploy-D contract: workflows authenticate with GitHub Actions OIDC, Slack is installed through the
-hosted OAuth page, and there is no runner secret or repository configuration file.
+pairs and activates the tenant with the compiled admin command.
 
 What the product does once a tenant is live is described in
 [How Feature-Rec works](product.md). Registering the GitHub and Slack apps, configuring and running
@@ -140,8 +138,7 @@ In each repository that should use Feature-Rec:
 4. Leave the action's `api-url` input unset for the hosted service; it defaults to
    `https://api.feature-rec.com`. A self-hosted backend sets `api-url` to its public origin, which
    must equal the backend's `FEATURE_REC_BASE_URL` because it is the OIDC audience.
-5. Remove any old `FEATURE_REC_RUNNER_TOKEN` secret or reference; no shared runner secret is used.
-6. Require the `Feature-Rec` status check in the branch protection rule or ruleset. Require the
+5. Require the `Feature-Rec` status check in the branch protection rule or ruleset. Require the
    check, not the workflow job (`Analyze and render`): the job finishes while the check waits for
    the Slack decision.
 
