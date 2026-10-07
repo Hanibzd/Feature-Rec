@@ -21,6 +21,24 @@ export type ReplicationResult = {
   real: boolean;
 };
 
+/**
+ * Captions are forbidden (the UI and the pointer tell the story), but a model facing a change
+ * that is hard to show tends to label it. Rejects visible text that names before/after states
+ * or shows code, unless that text exists in the sources.
+ */
+export function assertNoCaptions(code: string, sources: string): void {
+  const texts = [...code.matchAll(/>\s*([^<>{}]*?[A-Za-z][^<>{}]*?)\s*</g)].map((m) => m[1].trim()).filter(Boolean);
+  const literals = [...code.matchAll(/["'`]([^"'`\n]{3,80})["'`]/g)].map((m) => m[1]);
+  const caption = [...texts, ...literals].find(
+    (t) => /\b(before|after)\b\s*[:—–-](\s|$)|className\s*=|^\s*(before|after)\s*$/i.test(t) && !sources.includes(t),
+  );
+  if (caption) {
+    throw new Error(
+      `The scene shows a caption or code ("${caption.slice(0, 60)}"). No labels, captions or code on screen: only the product UI and the pointer.`,
+    );
+  }
+}
+
 /** Generation attempts per scene: the first answer plus one repair with the error fed back. */
 const ATTEMPTS = 2;
 
@@ -32,6 +50,8 @@ type Session = {
   turns: Turn[];
   real: RealComponents | null;
   after: string;
+  /** all source text the scene may legitimately display (before, after, local imports) */
+  sources: string;
 };
 const sessions = new Map<string, Session>();
 
@@ -61,6 +81,7 @@ async function generate(session: Session, attempts: number): Promise<void> {
     try {
       const code = validateScene(extractCodeBlock(raw));
       if (session.real) assertNoRetyping(code, session.after);
+      assertNoCaptions(code, session.sources);
       writeSceneFile(session.id, code);
       const typeErrors = typecheckScene(session.id);
       if (typeErrors.length === 0) return;
@@ -110,6 +131,7 @@ export async function replicate(
       turns: [{ role: "user", content: prompt.request }],
       real,
       after: feature.after,
+      sources: [feature.before, feature.after, ...localImports.map((f) => f.content)].join("\n"),
     };
     sessions.set(feature.id, session);
     try {

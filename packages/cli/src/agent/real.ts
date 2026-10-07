@@ -35,6 +35,8 @@ const CODE_EXTENSIONS = [".tsx", ".ts", ".jsx", ".js"];
 const STUBS: Record<string, string> = {
   "next/link": path.join(VIDEO_SRC, "kit/stubs/next-link"),
   "next/image": path.join(VIDEO_SRC, "kit/stubs/next-image"),
+  "next/navigation": path.join(VIDEO_SRC, "kit/stubs/next-navigation"),
+  "next/router": path.join(VIDEO_SRC, "kit/stubs/next-router"),
 };
 const videoRequire = createRequire(path.join(VIDEO_DIR, "package.json"));
 
@@ -42,8 +44,12 @@ const videoRequire = createRequire(path.join(VIDEO_DIR, "package.json"));
 const SPECIFIER_RE = /(\bfrom\s*|\bimport\s*)(["'])([^"'\n]+)\2/g;
 const DYNAMIC_IMPORT_RE = /\bimport\s*\(|\brequire\s*\(/;
 
+/** Type-only imports/exports are erased at compile time: they never need resolving. */
+const TYPE_ONLY_RE = /^\s*(?:import|export)\s+type\s[^;]*?from\s*["'][^"']+["'];?|^\s*import\s*\{\s*(?:type\s+[\w$]+(?:\s+as\s+[\w$]+)?\s*,?\s*)+\}\s*from\s*["'][^"']+["'];?/gm;
+const withoutTypeOnlyImports = (source: string) => source.replace(TYPE_ONLY_RE, "");
+
 function specifiers(source: string): string[] {
-  return [...source.matchAll(SPECIFIER_RE)].map((m) => m[3]);
+  return [...withoutTypeOnlyImports(source).matchAll(SPECIFIER_RE)].map((m) => m[3]);
 }
 
 function rewriteSpecifiers(source: string, map: Map<string, string>): string {
@@ -162,7 +168,8 @@ function copyRevision(entry: string, revision: Revision, read: RevisionReader, o
       if (local) queue.push(local);
     }
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, rewriteSpecifiers(source, rewrites));
+    // Type-only imports are dropped from the copy: the bundler must not try to resolve them.
+    fs.writeFileSync(target, rewriteSpecifiers(withoutTypeOnlyImports(source), rewrites));
   }
   return seen.size;
 }

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { assertNoRetyping, localImportSources, prepareRealComponents, type RevisionReader } from "../src/agent/real.ts";
 import { globalVariables, loadTailwindConfig, themeDeclarations } from "../src/agent/theme.ts";
+import { assertNoCaptions } from "../src/agent/index.ts";
 import { withoutComponentsShownInContext } from "../src/feature-rec.ts";
 import { GENERATED_DIR } from "../src/paths.ts";
 
@@ -80,6 +81,13 @@ try {
   ok("unknown npm package falls back to reconstruction", unsupported(`import x from "some-provider-sdk";\nexport function Card() { return <div />; }`));
   ok("CSS module import falls back to reconstruction", unsupported(`import s from "./card.module.css";\nexport function Card() { return <div className={s.a} />; }`));
   ok("dynamic import falls back to reconstruction", unsupported(`export function Card() { void import("./x"); return <div />; }`));
+
+  // Type-only imports never block real mode and are dropped from the copies; Next routing is stubbed.
+  const typed = `import type { User } from "@prisma/client";\nimport { type Session } from "next-auth";\nimport { useRouter } from "next/navigation";\nexport function Card(p: { user: User; s?: Session }) { useRouter(); return <p>{p.user.name}</p>; }`;
+  const typedReal = prepareRealComponents({ id: ID, file, before: "", after: typed, globalsCss: "", read: (rev, p) => (p === file ? typed : read(rev, p)) });
+  const typedCopy = typedReal ? fs.readFileSync(path.join(dir, "after", file), "utf8") : "";
+  ok("type-only imports are ignored and removed from the copy", typedReal !== null && !typedCopy.includes("@prisma/client") && !typedCopy.includes("next-auth"));
+  ok("next/navigation is rewritten to the render stub", /kit\/stubs\/next-navigation/.test(typedCopy));
 
   const noRepo = prepareRealComponents({ id: ID, file, before: "", after: repo.after[file], globalsCss: "" });
   ok("without repository access, only React-only files qualify", noRepo === null);
@@ -169,7 +177,25 @@ const kept = withoutComponentsShownInContext([
   { file: "src/components/site/Header.tsx", after: "export default function Header() {}" },
   { file: "src/components/Footer.tsx", after: "export function Footer() {}" },
 ]).map((s) => s.file);
+ok("alias to a root-level folder counts as shown in context", withoutComponentsShownInContext([
+  { file: "components/dashboard/user-avatar.tsx", after: `import { Avatar } from "@/ui/avatar";` },
+  { file: "ui/avatar.tsx", after: "export function Avatar() {}" },
+]).length === 1);
 ok("imported changed files are dropped (relative and alias imports)", kept.join(",") === "src/components/PricingCard.tsx,app/settings/page.tsx,src/components/Footer.tsx");
+
+// Caption guard
+const rejects = (code: string, sources = "") => {
+  try {
+    assertNoCaptions(code, sources);
+    return false;
+  } catch {
+    return true;
+  }
+};
+ok("caption guard rejects before/after labels", rejects(`<p className="text-xs">After: avatar image with object-cover</p>`));
+ok("caption guard rejects code shown as text", rejects(`<code>{'className={cn("object-cover", className)}'}</code>`));
+ok("caption guard accepts Tailwind before:/after: variants", !rejects(`<span className="after:content-[''] before:absolute" />`));
+ok("caption guard accepts text that exists in the sources", !rejects(`<p>Before: read this</p>`, "<p>Before: read this</p>"));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

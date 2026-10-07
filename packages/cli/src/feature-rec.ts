@@ -79,7 +79,10 @@ export function withoutComponentsShownInContext<T extends { file: string; after:
       if (other === candidate) return false;
       return [...other.after.matchAll(/\bfrom\s*["']([^"']+)["']/g)].some(([, spec]) => {
         const resolved = spec.startsWith(".") ? stem(path.posix.join(path.posix.dirname(other.file), spec)) : stem(spec);
-        return resolved === target || (!spec.startsWith(".") && target.endsWith(resolved.replace(/^[@~]\//, "/")));
+        if (spec.startsWith(".")) return resolved === target;
+        // alias ("@/components/x", "~/ui/x"): compare the aliased path with the file's path tail
+        const tail = resolved.replace(/^[@~]\//, "");
+        return target === tail || target.endsWith(`/${tail}`);
       });
     });
   });
