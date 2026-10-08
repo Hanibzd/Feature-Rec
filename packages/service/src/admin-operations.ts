@@ -288,9 +288,8 @@ export async function provisionTenant(input: {
     // Routing belongs to the Slack team, so a re-paired workspace keeps it.
     // Joins before activation are dropped, so like the delivery fallback,
     // select a sole bot membership and never guess between several.
-    const selectedChannelId = input.selectedChannelId
-      ?? teamRow?.selected_channel_id
-      ?? (slack.channelIds.length === 1 ? slack.channelIds[0] : null);
+    const selectedChannelId = input.selectedChannelId ?? teamRow?.selected_channel_id ??
+      (slack.channelIds.length === 1 ? slack.channelIds[0] : null);
     await trx
       .insertInto("slack_workspaces")
       .values({

@@ -46,7 +46,6 @@ const db = new Kysely<DB>({
     pool: new Pool({ connectionString: testUrl, application_name: "feature-rec-admin-selftest" }),
   }),
 });
-// Reads channel selections through the runtime's store interface.
 const runtimeStore = new PostgresCycleStore(testUrl);
 const key = Buffer.alloc(32, 9);
 const tenantId = "e3f88c55-c8ca-410d-b2aa-a2636086bcd9";
@@ -472,32 +471,6 @@ try {
     '["UNEW"]',
   );
 
-  // Slack joins before activation are not recorded, so provisioning without a
-  // channel ID selects the bot's only channel, as the delivery fallback does.
-  const provisionWithChannels = async (teamId: string, installationId: string, channelIds: string[]) => {
-    const report = await provisionTenant({
-      db,
-      providers: {
-        inspectSlackToken: async () => ({ teamId, botUserId: `U${teamId}`, channelIds }),
-        inspectInstallationRepository: async (id, owner, repo) => ({
-          installationId: id, githubAccountId: id, repositoryId: id,
-          repositoryOwnerId: id, owner, repo, fullName: `${owner}/${repo}`,
-        }),
-      },
-      slackBotToken: `xoxb-${teamId}`,
-      encryptionKey: key,
-      installationId,
-      checkRepository: { owner: "Channel", repo: "Repo" },
-    });
-    return { reported: report.selectedChannelId, selected: await runtimeStore.getSelectedChannelId(teamId) };
-  };
-  assert.deepEqual(await provisionWithChannels("TSOLE", "22001", ["CSOLE"]), { reported: "CSOLE", selected: "CSOLE" });
-  // An existing selection wins over the bot's only channel.
-  assert.deepEqual(await provisionWithChannels("TSOLE", "22001", ["COTHER"]), { reported: "CSOLE", selected: "CSOLE" });
-  // With no channel or several channels, provisioning does not guess.
-  assert.deepEqual(await provisionWithChannels("TNONE", "22002", []), { reported: null, selected: null });
-  assert.deepEqual(await provisionWithChannels("TMANY", "22003", ["CMANY1", "CMANY2"]), { reported: null, selected: null });
-
   const provisioningBlocker = new Client({ connectionString: testUrl });
   await provisioningBlocker.connect();
   try {
@@ -674,6 +647,26 @@ try {
   await provisionTenant({ ...oauthInput, slackInstallationId: thirdRetry.id, installationId: "20003", selectedChannelId: "COAUTH3" });
   assert.equal((await validateIntegrity({ db, encryptionKey: key })).ok, true);
 
+  // Slack joins before activation are not recorded, so provisioning without a
+  // channel ID selects the bot's only channel, as the delivery fallback does.
+  const provisionWithChannels = async (teamId: string, installationId: string, channelIds: string[]) => {
+    const report = await provisionTenant({
+      db,
+      providers: { ...oauthProviders, inspectSlackToken: async () => ({ teamId, botUserId: `U${teamId}`, channelIds }) },
+      slackBotToken: `xoxb-${teamId}`,
+      encryptionKey: key,
+      installationId,
+      checkRepository: { owner: "Channel", repo: "Repo" },
+    });
+    return { reported: report.selectedChannelId, selected: await runtimeStore.getSelectedChannelId(teamId) };
+  };
+  assert.deepEqual(await provisionWithChannels("TSOLE", "22001", ["CSOLE"]), { reported: "CSOLE", selected: "CSOLE" });
+  // An existing selection wins over the bot's only channel.
+  assert.deepEqual(await provisionWithChannels("TSOLE", "22001", ["COTHER"]), { reported: "CSOLE", selected: "CSOLE" });
+  // With no channel or several channels, provisioning does not guess.
+  assert.deepEqual(await provisionWithChannels("TNONE", "22002", []), { reported: null, selected: null });
+  assert.deepEqual(await provisionWithChannels("TMANY", "22003", ["CMANY1", "CMANY2"]), { reported: null, selected: null });
+
   // Exercise the actual compiled command without provider network or shared dist.
   // The preload supplies only fake fetch responses; CLI parsing, env validation,
   // provider clients, crypto and PostgreSQL transactions run unchanged.
@@ -762,7 +755,8 @@ try {
     assert.equal(JSON.parse((await cli([...cancelArgs, "--confirm"], brokenConfig)).stdout).cancelled, false);
     await assert.rejects(cli(["slack-installation-status", "--environment", "selftest", "--slack-installation-id", "invalid"], brokenConfig), /must be a UUID/);
     await assert.rejects(cli(["slack-installation-status", "--slack-installation-id", fourth.id], brokenConfig), /--environment is required/);
-    const manualCli = await cli(provisionArgs.slice(0, -2), {}, fourth.token);
+    // This call keeps the flag, so a compiled call still sends it through the CLI.
+    const manualCli = await cli([...provisionArgs.slice(0, -2), "--selected-channel-id", "CCLI"], {}, fourth.token);
     assert.equal(JSON.parse(manualCli.stdout).tenantId, activatedReceipt.tenantId);
     const manualEnvelope = (await db.selectFrom("slack_workspaces").select("bot_token_ciphertext").where("team_id", "=", fourth.teamId).executeTakeFirstOrThrow()).bot_token_ciphertext;
     assert.notEqual(manualEnvelope, fourth.expectedCiphertext);

@@ -513,8 +513,9 @@ database.
 
 The following checks exercise real integrations in staging.
 
-In a staging Slack workspace, also verify that the first join gets one greeting and later joins are
-silent; switch from a DM and confirm there is one ephemeral reply and no channel-visible post;
+In a staging Slack workspace where the bot was in no channel at provisioning, also verify that the
+first join gets one greeting and later joins are silent; switch from a DM and confirm there is one
+ephemeral reply and no channel-visible post;
 confirm each channel's mention mode and approvers survive the switch; exercise `mention approvers`,
 `mention off`, and a custom audience; reject a mention or approver whose usergroup contains a
 non-member; and remove the selected channel to confirm delivery fails without moving to another

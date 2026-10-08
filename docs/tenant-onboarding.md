@@ -83,7 +83,7 @@ Before writing anything, the command:
 - checks that the repository to check belongs to the GitHub installation and that the App can mint
   a token scoped to that repository.
 
-If the operator gives `--selected-channel-id`, the command also checks that the bot is a member of
+If the operator passes `--selected-channel-id`, the command also checks that the bot is a member of
 that channel.
 
 It then creates the tenant, or reuses the one that already owns these integrations, stores the
@@ -99,15 +99,12 @@ pending installation consumed, all in one transaction. It prints a JSON report w
   a wrong installation ID or a missing repository grant before the tenant goes live. The command
   does not store the repository. The tenant pairs the whole installation, so every repository that
   the installation grants works after activation, provided that it has the workflow.
-- Without `--selected-channel-id`, the command keeps the workspace's existing selection. If the
-  workspace has no selection, the result depends on the bot's channels:
-  - Exactly one channel: the command selects that channel.
-  - No channel: the first channel that the bot joins after provisioning becomes the selection.
-  - More than one channel: pass `--selected-channel-id`, or select the channel after provisioning
-    with `/feature-rec channel`.
-
-  The report's `selectedChannelId` shows the result. `--selected-channel-id` always replaces an
-  existing selection.
+- Without `--selected-channel-id`, the command keeps the workspace's existing selection. If there is
+  none and the bot is in exactly one channel, the command selects that channel. If the bot is in
+  more than one channel, pass `--selected-channel-id`, or select the channel after provisioning with
+  `/feature-rec channel`. The flag always replaces an existing selection. The report's
+  `selectedChannelId` shows the result. [Channel routing](product.md#channel-routing) describes how
+  later joins and commands select a channel.
 - Pass `--tenant-id <uuid>` when re-provisioning a known tenant; a new tenant gets a generated ID.
 - The command refuses to move an integration that belongs to another tenant; see
   [Change or remove a tenant](#change-or-remove-a-tenant).
