@@ -34,7 +34,7 @@ to another tenant. Collect these values during onboarding:
 | GitHub installation ID | [Install the GitHub App](#install-the-github-app) |
 | One repository to check, as `owner/repo` | Any repository the installation grants; see [Provision the tenant](#provision-the-tenant) |
 | Slack installation ID and workspace ID | The completion page of [Install the Slack app](#install-the-slack-app) |
-| Review channel ID | Slack channel details, at the bottom of the **About** tab |
+| Review channel ID, only if the bot is in more than one channel at provisioning | Slack channel details, at the bottom of the **About** tab |
 
 ## Install the GitHub App
 
@@ -58,9 +58,9 @@ to another tenant. Collect these values during onboarding:
    cannot be used until the operator provisions it. If the page instead says
    `Slack installation could not be completed. Start again at /api/slack/oauth/start.`, start again.
 4. Invite `@Feature-Rec` to the review channel, for example with `/invite @Feature-Rec` in that
-   channel, and send the channel ID to the operator. Joins before provisioning are not recorded, so
-   the operator selects the channel when provisioning. Never use an externally shared (Slack
-   Connect) channel; see [Channel routing](product.md#channel-routing).
+   channel. You can do this before or after provisioning. If the bot is in more than one channel
+   before provisioning, send the review channel ID to the operator. Never use an externally shared
+   (Slack Connect) channel. See [Channel routing](product.md#channel-routing).
 
 Pending installations do not expire. The operator should confirm the workspace ID with the customer
 before provisioning, and [cancel](#change-or-remove-a-tenant) installations that will not be used.
@@ -72,8 +72,7 @@ The operator activates the tenant from the production service:
 ```bash
 railway ssh -- node dist/admin.js provision-tenant --environment production --confirm \
   --slack-installation-id <Slack-installation-id> \
-  --installation-id <GitHub-installation-id> --check-repository <owner/repo> \
-  --selected-channel-id <Slack-channel-id>
+  --installation-id <GitHub-installation-id> --check-repository <owner/repo>
 ```
 
 Before writing anything, the command:
@@ -81,9 +80,11 @@ Before writing anything, the command:
 - decrypts the pending installation and checks with Slack's `auth.test` that the token still
   belongs to the same workspace and bot, so an installation that was removed or revoked at Slack
   cannot be activated;
-- checks that the bot is a member of the selected channel;
 - checks that the repository to check belongs to the GitHub installation and that the App can mint
   a token scoped to that repository.
+
+If the operator passes `--selected-channel-id`, the command also checks that the bot is a member of
+that channel.
 
 It then creates the tenant, or reuses the one that already owns these integrations, stores the
 exact validated encrypted token, records the GitHub installation, enables the tenant and marks the
@@ -98,9 +99,12 @@ pending installation consumed, all in one transaction. It prints a JSON report w
   a wrong installation ID or a missing repository grant before the tenant goes live. The command
   does not store the repository. The tenant pairs the whole installation, so every repository that
   the installation grants works after activation, provided that it has the workflow.
-- Without `--selected-channel-id`, an existing selection for the workspace is kept. Otherwise a
-  channel is selected later: by the bot's next channel join, by `/feature-rec channel`, or when the
-  first validation finds the bot in exactly one channel.
+- Without `--selected-channel-id`, the command keeps the workspace's existing selection. If there is
+  none and the bot is in exactly one channel, the command selects that channel. If the bot is in
+  more than one channel, pass `--selected-channel-id`, or select the channel after provisioning with
+  `/feature-rec channel`. The flag always replaces an existing selection. The report's
+  `selectedChannelId` shows the result. [Channel routing](product.md#channel-routing) describes how
+  later joins and commands select a channel.
 - Pass `--tenant-id <uuid>` when re-provisioning a known tenant; a new tenant gets a generated ID.
 - The command refuses to move an integration that belongs to another tenant; see
   [Change or remove a tenant](#change-or-remove-a-tenant).
@@ -123,8 +127,7 @@ pnpm --filter @feature-rec/service run build
 ```bash
 node --env-file=.env packages/service/dist/admin.js provision-tenant \
   --environment development --confirm --slack-installation-id <Slack-installation-id> \
-  --installation-id <GitHub-installation-id> --check-repository <owner/repo> \
-  --selected-channel-id <Slack-channel-id>
+  --installation-id <GitHub-installation-id> --check-repository <owner/repo>
 ```
 
 ## Add the workflow
@@ -246,8 +249,7 @@ non-echoing terminal prompt, or from stdin when it is not a terminal:
 
 ```bash
 railway ssh -- node dist/admin.js provision-tenant --environment production --confirm \
-  --installation-id <GitHub-installation-id> --check-repository <owner/repo> \
-  --selected-channel-id <Slack-channel-id>
+  --installation-id <GitHub-installation-id> --check-repository <owner/repo>
 ```
 
 Never pass a token as a command-line argument. The command runs the same Slack and GitHub checks,
