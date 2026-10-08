@@ -20,6 +20,7 @@ import {
 } from "../src/admin-operations";
 import { decryptSlackToken, encryptSlackToken } from "../src/slack-token-crypto";
 import { migrationProvider } from "../src/storage/migrations";
+import { PostgresCycleStore } from "../src/storage/postgres";
 import type { DB } from "../src/storage/schema";
 import { inspectSlackTokenEncryption } from "../src/storage/slack-token-check";
 import {
@@ -45,6 +46,8 @@ const db = new Kysely<DB>({
     pool: new Pool({ connectionString: testUrl, application_name: "feature-rec-admin-selftest" }),
   }),
 });
+// Reads channel selections through the runtime's store interface.
+const runtimeStore = new PostgresCycleStore(testUrl);
 const key = Buffer.alloc(32, 9);
 const tenantId = "e3f88c55-c8ca-410d-b2aa-a2636086bcd9";
 
@@ -469,6 +472,32 @@ try {
     '["UNEW"]',
   );
 
+  // Slack joins before activation are not recorded, so provisioning without a
+  // channel ID selects the bot's only channel, as the delivery fallback does.
+  const provisionWithChannels = async (teamId: string, installationId: string, channelIds: string[]) => {
+    const report = await provisionTenant({
+      db,
+      providers: {
+        inspectSlackToken: async () => ({ teamId, botUserId: `U${teamId}`, channelIds }),
+        inspectInstallationRepository: async (id, owner, repo) => ({
+          installationId: id, githubAccountId: id, repositoryId: id,
+          repositoryOwnerId: id, owner, repo, fullName: `${owner}/${repo}`,
+        }),
+      },
+      slackBotToken: `xoxb-${teamId}`,
+      encryptionKey: key,
+      installationId,
+      checkRepository: { owner: "Channel", repo: "Repo" },
+    });
+    return { reported: report.selectedChannelId, selected: await runtimeStore.getSelectedChannelId(teamId) };
+  };
+  assert.deepEqual(await provisionWithChannels("TSOLE", "22001", ["CSOLE"]), { reported: "CSOLE", selected: "CSOLE" });
+  // An existing selection wins over the bot's only channel.
+  assert.deepEqual(await provisionWithChannels("TSOLE", "22001", ["COTHER"]), { reported: "CSOLE", selected: "CSOLE" });
+  // With no channel or several channels, provisioning does not guess.
+  assert.deepEqual(await provisionWithChannels("TNONE", "22002", []), { reported: null, selected: null });
+  assert.deepEqual(await provisionWithChannels("TMANY", "22003", ["CMANY1", "CMANY2"]), { reported: null, selected: null });
+
   const provisioningBlocker = new Client({ connectionString: testUrl });
   await provisioningBlocker.connect();
   try {
@@ -683,7 +712,7 @@ try {
       child.stdin!.end(manualToken === undefined ? undefined : `${manualToken}\n`);
     });
     const fourth = await stage(4);
-    const provisionArgs = ["provision-tenant", "--environment", "selftest", "--confirm", "--installation-id", "21001", "--check-repository", "Cli/Repo", "--selected-channel-id", "CCLI", "--slack-installation-id", fourth.id];
+    const provisionArgs = ["provision-tenant", "--environment", "selftest", "--confirm", "--installation-id", "21001", "--check-repository", "Cli/Repo", "--slack-installation-id", fourth.id];
     await assert.rejects(cli(provisionArgs.filter((arg) => arg !== "--confirm")), /requires --confirm/);
     await assert.rejects(cli(provisionArgs, { RAILWAY_ENVIRONMENT_NAME: "production" }), /does not match/);
     const beforeCliFailure = await snapshot();
@@ -705,6 +734,9 @@ try {
     const activatedReceipt = JSON.parse(activatedCli.stdout);
     assert.equal(activatedReceipt.slackTeamId, fourth.teamId);
     assert.equal(activatedReceipt.checkedRepositoryId, "21001");
+    // The fake bot is in one channel, so the command selects it without the flag.
+    assert.equal(activatedReceipt.selectedChannelId, "CCLI");
+    assert.equal(await runtimeStore.getSelectedChannelId(fourth.teamId), "CCLI");
     assert.equal((await db.selectFrom("slack_workspaces").select("bot_token_ciphertext").where("team_id", "=", fourth.teamId).executeTakeFirstOrThrow()).bot_token_ciphertext, fourth.expectedCiphertext);
     const brokenConfig = { FEATURE_REC_SLACK_TOKEN_ENCRYPTION_KEY: "invalid", GITHUB_OIDC_ISSUER: "invalid", SLACK_APP_ID: "partial" };
     const stateBeforeRead = await db.selectFrom("slack_oauth_installations").selectAll().where("id", "=", fourth.id).executeTakeFirstOrThrow();
@@ -742,6 +774,7 @@ try {
   console.log("service admin selftest passed");
 } finally {
   await db.destroy().catch(() => {});
+  await runtimeStore.close().catch(() => {});
   const dropper = new Client({ connectionString: adminUrl });
   await dropper.connect();
   await dropper.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);

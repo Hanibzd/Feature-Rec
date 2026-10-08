@@ -179,7 +179,8 @@ All repositories of a tenant share the one review channel selected for its Slack
   Later joins are silent. Anyone in the workspace can select another channel the bot belongs to
   with `/feature-rec channel #channel-name`, and operators can set it when
   [provisioning](tenant-onboarding.md#provision-the-tenant). Joins that happen before the workspace
-  is provisioned are not recorded.
+  is provisioned are not recorded. If the workspace has no selection at provisioning and the bot is
+  in exactly one channel, provisioning selects that channel without a greeting.
 - **Missed joins.** If nothing is selected when a validation is ready and the bot is in exactly one
   channel, delivery selects that channel and greets it. With several memberships it refuses to
   guess and asks for `/feature-rec channel #channel-name`.
