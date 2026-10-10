@@ -1,0 +1,231 @@
+/* Self-test for real-component mode (import resolution, retyping guard) and the target theme. */
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { assertNoRetyping, localImportSources, prepareRealComponents, type RevisionReader } from "../src/agent/real.ts";
+import { globalVariables, loadTailwindConfig, themeDeclarations } from "../src/agent/theme.ts";
+import { assertClicksNewControl, assertNoCaptions, assertTargetsTheChange } from "../src/agent/index.ts";
+import { addsClickHandler } from "../src/agent/real.ts";
+import { withoutComponentsShownInContext } from "../src/feature-rec.ts";
+import { GENERATED_DIR } from "../src/paths.ts";
+
+let pass = 0;
+let fail = 0;
+function ok(name: string, cond: boolean) {
+  if (cond) {
+    pass++;
+    console.log(`  ✓ ${name}`);
+  } else {
+    fail++;
+    console.log(`  ✗ ${name}`);
+  }
+}
+
+const ID = "zz-real-selftest";
+const dir = path.join(GENERATED_DIR, ID);
+const cleanup = () => fs.rmSync(dir, { recursive: true, force: true });
+
+// A small repository, readable at two revisions.
+const repo: Record<string, Record<string, string>> = {
+  before: {
+    "tsconfig.json": `{ // comments are fine
+      "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["./src/*"] }, }
+    }`,
+    "src/components/Card.tsx": `import { Button } from "@/components/ui/button";\nexport function Card() { return <Button>Old</Button>; }`,
+    "src/components/ui/button.tsx": `import { cn } from "../../lib/utils";\nexport function Button(p: { children: React.ReactNode }) { return <button className={cn("a")}>{p.children}</button>; }`,
+    "src/lib/utils.ts": `import { clsx } from "clsx";\nexport const cn = (...c: string[]) => clsx(c); // before`,
+  },
+  after: {
+    "tsconfig.json": `{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["./src/*"] } } }`,
+    "src/components/Card.tsx": `import Link from "next/link";\nimport { Button } from "@/components/ui/button";\nimport { Plus } from "lucide-react";\nexport function Card() { return <Link href="/x"><Button><Plus />New</Button></Link>; }`,
+    "src/components/ui/button.tsx": `import { cn } from "../../lib/utils";\nexport function Button(p: { children: React.ReactNode }) { return <button className={cn("a")}>{p.children}</button>; }`,
+    "src/lib/utils.ts": `import { clsx } from "clsx";\nexport const cn = (...c: string[]) => clsx(c); // after`,
+  },
+};
+const read: RevisionReader = (rev, p) => repo[rev][p] ?? null;
+const file = "src/components/Card.tsx";
+
+try {
+  const skips: string[] = [];
+  const real = prepareRealComponents({
+    id: ID,
+    file,
+    before: repo.before[file],
+    after: repo.after[file],
+    globalsCss: "body { font-family: Inter, sans-serif; background: #fafafa; }",
+    read,
+    onSkip: (r) => skips.push(r),
+  });
+  ok("real mode accepted for an alias + relative + npm + next/link import graph", real !== null && skips.length === 0);
+  ok("named exports become Before/After imports", Boolean(real?.importLines.includes(`import { Card as After } from "./${ID}/after/src/components/Card"`)));
+  ok("all local files copied for each revision", real?.copied === 3);
+  const copiedAfter = fs.readFileSync(path.join(dir, "after", file), "utf8");
+  ok("alias rewritten to a relative path", copiedAfter.includes(`from "./ui/button"`));
+  ok("next/link rewritten to the render stub", /from "(\.\.\/)+kit\/stubs\/next-link"/.test(copiedAfter));
+  ok("npm import the renderer has is kept", copiedAfter.includes(`from "lucide-react"`));
+  ok("BEFORE dependencies come from the BEFORE revision", fs.readFileSync(path.join(dir, "before/src/lib/utils.ts"), "utf8").includes("// before"));
+  ok("rendered files the PR changes are passed on, unchanged ones are not", real?.changedFiles.map((f) => f.path).join() === "src/lib/utils.ts");
+  ok("app font and background read from the global CSS", real?.appFont === "Inter, sans-serif" && real?.pageBackground === "#fafafa");
+
+  const unsupported = (after: string) => {
+    const reasons: string[] = [];
+    const r = prepareRealComponents({
+      id: ID,
+      file,
+      before: "",
+      after,
+      globalsCss: "",
+      read: (rev, p) => (p === file ? after : read(rev, p)),
+      onSkip: (x) => reasons.push(x),
+    });
+    return r === null && reasons.length === 1 && !fs.existsSync(dir);
+  };
+  ok("unknown npm package falls back to reconstruction", unsupported(`import x from "some-provider-sdk";\nexport function Card() { return <div>{x}</div>; }`));
+  ok("CSS module import falls back to reconstruction", unsupported(`import s from "./card.module.css";\nexport function Card() { return <div className={s.a} />; }`));
+  ok("dynamic import falls back to reconstruction", unsupported(`export function Card() { void import("./x"); return <div />; }`));
+
+  // Type-only imports never block real mode and are dropped from the copies; Next routing is stubbed.
+  const typed = `import type { User } from "@prisma/client";\nimport { type Session } from "next-auth";\nimport { useRouter } from "next/navigation";\nexport function Card(p: { user: User; s?: Session }) { useRouter(); return <p>{p.user.name}</p>; }`;
+  const typedReal = prepareRealComponents({ id: ID, file, before: "", after: typed, globalsCss: "", read: (rev, p) => (p === file ? typed : read(rev, p)) });
+  const typedCopy = typedReal ? fs.readFileSync(path.join(dir, "after", file), "utf8") : "";
+  ok("type-only imports are ignored and removed from the copy", typedReal !== null && !typedCopy.includes("@prisma/client") && !typedCopy.includes("next-auth"));
+  ok("next/navigation is rewritten to the render stub", /kit\/stubs\/next-navigation/.test(typedCopy));
+  const elided = `import { User } from "@prisma/client";\nexport function Card(p: { user: User }) { return <p>{p.user.name}</p>; }`;
+  ok("imports used only as types are elided like the bundler does", prepareRealComponents({ id: ID, file, before: "", after: elided, globalsCss: "", read: (rev, p) => (p === file ? elided : read(rev, p)) }) !== null);
+
+  const noRepo = prepareRealComponents({ id: ID, file, before: "", after: repo.after[file], globalsCss: "" });
+  ok("without repository access, only React-only files qualify", noRepo === null);
+} finally {
+  cleanup();
+}
+
+// Reconstruction context: local imports (code and CSS modules) of the AFTER file.
+const ctxRepo: Record<string, string> = {
+  "src/components/Pricing.tsx": `import { PlanNote } from "./PlanNote";\nimport { Button } from "@/components/ui/button";\nimport x from "some-pkg";\nexport const P = () => <div>{x}<PlanNote /><Button /></div>;`,
+  "src/components/PlanNote.tsx": `import styles from "./PlanNote.module.css";\nexport function PlanNote() { return <p className={styles.note} />; }`,
+  "src/components/PlanNote.module.css": `.note { border-left: 3px solid #6366f1; }`,
+  "src/components/ui/button.tsx": `export function Button() { return <button />; }`,
+  "tsconfig.json": `{ "compilerOptions": { "paths": { "@/*": ["./src/*"] } } }`,
+};
+const ctx = localImportSources("src/components/Pricing.tsx", (_rev, p) => ctxRepo[p] ?? null).map((f) => f.path);
+ok("reconstruction context follows relative and alias imports, CSS modules included", ["src/components/PlanNote.tsx", "src/components/ui/button.tsx", "src/components/PlanNote.module.css"].every((p) => ctx.includes(p)) && ctx.length === 3);
+
+// Retyping guard
+const after = `<div className="rounded-2xl bg-white p-8 shadow-xl"><p className="text-sm font-semibold text-slate-900">A</p><span className="mt-0.5 text-xs leading-5 text-slate-500">B</span></div>`;
+let threw = false;
+try {
+  assertNoRetyping(`<div className="rounded-2xl bg-white p-8 shadow-xl"/><p className="text-sm font-semibold text-slate-900"/><span className="mt-0.5 text-xs leading-5 text-slate-500"/>`, after);
+} catch {
+  threw = true;
+}
+ok("retyping guard rejects a scene that copies the component's classNames", threw);
+let passed = true;
+try {
+  assertNoRetyping(`<Morph at={30} before={<Before />} after={<After />} />`, after);
+} catch {
+  passed = false;
+}
+ok("retyping guard accepts a scene that renders the real files", passed);
+
+// Theme
+const decls = themeDeclarations({
+  theme: {
+    extend: {
+      colors: { brand: { 50: "#eef2ff", 600: "#4f46e5", DEFAULT: "#6366f1" }, "bad key!": "#000", border: "hsl(var(--border))" },
+      borderRadius: { card: "1rem" },
+      fontFamily: { display: ["Cal Sans", "sans-serif"] },
+      fontSize: { tiny: ["0.625rem", { lineHeight: "1rem" }] },
+      boxShadow: { evil: "0 0 0 red; } body { display: none" },
+    },
+  },
+});
+ok("nested colors and DEFAULT flatten to --color-*", decls.includes("  --color-brand-600: #4f46e5;") && decls.includes("  --color-brand: #6366f1;"));
+ok("CSS-variable colors are kept", decls.includes("  --color-border: hsl(var(--border));"));
+ok("radius, font family and font size map to v4 namespaces", decls.includes("  --radius-card: 1rem;") && decls.includes(`  --font-display: "Cal Sans", sans-serif;`) && decls.includes("  --text-tiny: 0.625rem;"));
+ok("unsafe keys and values are dropped", !decls.some((d) => d.includes("bad key") || d.includes("display: none")));
+const vars = globalVariables(`@layer base { :root { --primary: 240 5.9% 10%; color: red; } .dark { --primary: 0 0% 98%; } }\n@theme inline { --color-accent: oklch(0.7 0.1 200); }`);
+ok("custom properties of :root and .dark are carried over", vars.includes(":root {\n  --primary: 240 5.9% 10%;\n}") && vars.includes(".dark {\n  --primary: 0 0% 98%;\n}") && !vars.includes("color: red"));
+ok("v4 @theme blocks are carried over", vars.includes("@theme {\n  --color-accent: oklch(0.7 0.1 200);\n}"));
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "fr-theme-"));
+try {
+  const configPath = path.join(tmp, "tailwind.config.ts");
+  fs.writeFileSync(path.join(tmp, "tokens.ts"), `export const brand = { 600: "#123456" };\n`);
+  fs.writeFileSync(
+    configPath,
+    `import type { Config } from "tailwindcss";\nimport animate from "tailwindcss-animate-missing";\nimport { brand } from "./tokens";\nexport default {\n  content: ["./src/**/*.tsx"],\n  theme: { extend: { colors: { brand } } },\n  plugins: [animate, require("another-missing-plugin")],\n} satisfies Config;\n`,
+  );
+  const config = await loadTailwindConfig(configPath);
+  ok("TS config with missing plugins and a relative import loads", themeDeclarations(config).includes("  --color-brand-600: #123456;"));
+
+  // The target's config is read, never executed (the action process holds secrets).
+  const marker = path.join(tmp, "executed");
+  const trap = path.join(tmp, "tailwind.config.js");
+  fs.writeFileSync(
+    trap,
+    `const fs = require("node:fs");\nfs.writeFileSync(${JSON.stringify(marker)}, process.env.ANTHROPIC_API_KEY || "x");\nconst colors = require("tailwindcss/colors");\nmodule.exports = { theme: { extend: { colors: { accent: colors.indigo, ...{ extra: "#010203" } } } } };\n`,
+  );
+  const trapped = await loadTailwindConfig(trap);
+  ok("config code is never executed", !fs.existsSync(marker));
+  const trapDecls = themeDeclarations(trapped);
+  ok("Tailwind's own helpers and spreads still resolve", trapDecls.includes("  --color-accent-600: oklch(51.1% 0.262 276.966);") && trapDecls.includes("  --color-extra: #010203;"));
+} finally {
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// Changed components shown inside another changed file get no scene of their own.
+const kept = withoutComponentsShownInContext([
+  { file: "src/components/PricingCard.tsx", after: `import { BillingToggle } from "./BillingToggle";` },
+  { file: "src/components/BillingToggle.tsx", after: "export function BillingToggle() {}" },
+  { file: "app/settings/page.tsx", after: `import Header from "@/components/site/Header";` },
+  { file: "src/components/site/Header.tsx", after: "export default function Header() {}" },
+  { file: "src/components/Footer.tsx", after: "export function Footer() {}" },
+]).map((s) => s.file);
+ok("alias to a root-level folder counts as shown in context", withoutComponentsShownInContext([
+  { file: "components/dashboard/user-avatar.tsx", after: `import { Avatar } from "@/ui/avatar";` },
+  { file: "ui/avatar.tsx", after: "export function Avatar() {}" },
+]).length === 1);
+ok("imported changed files are dropped (relative and alias imports)", kept.join(",") === "src/components/PricingCard.tsx,app/settings/page.tsx,src/components/Footer.tsx");
+
+// Caption guard
+const rejects = (code: string, sources = "") => {
+  try {
+    assertNoCaptions(code, sources);
+    return false;
+  } catch {
+    return true;
+  }
+};
+const offTarget = (code: string, before: string, after: string) => {
+  try {
+    assertTargetsTheChange(code, before, after);
+    return false;
+  } catch {
+    return true;
+  }
+};
+const cardBefore = `<section>\n  <h2>Starter</h2>\n  <div>\n    <p className="font-semibold">Switch to annual</p>\n  </div>\n  <button className="bg-slate-900">\n    Get started\n  </button>\n</section>`;
+const cardAfter = cardBefore.replace("<h2>Starter</h2>", "<h2>Starter</h2>\n  <BillingToggle />").replace("bg-slate-900", "bg-brand-600");
+ok("target guard rejects a pointer that only visits untouched elements", offTarget(`path: [{ frame: 60, to: { text: "Switch to annual" } }]`, cardBefore, cardAfter));
+ok("target guard accepts text from a new file of the PR", !offTarget(`path: [{ frame: 75, to: { text: "Annual" } }], clicks: [78]`, cardBefore, cardAfter));
+ok("target guard accepts an element whose style changed", !offTarget(`focus={[{ from: 50, text: "Get started" }]}`, cardBefore, cardAfter));
+ok("target guard ignores new components and data-focus ids", !offTarget(`path: [{ frame: 60, to: "signin-btn" }]`, "", cardAfter));
+ok("a new onClick counts as a new control", addsClickHandler(`<p>Plan</p>`, `<p>Plan</p>\n<button onClick={() => setOpen(true)}>Open</button>`));
+ok("an unchanged onClick does not", !addsClickHandler(`<button onClick={go}>Go</button>`, `<h2>New title</h2>\n<button onClick={go}>Go</button>`));
+const noClick = (code: string, adds: boolean) => {
+  try {
+    assertClicksNewControl(code, adds);
+    return false;
+  } catch {
+    return true;
+  }
+};
+ok("click guard rejects a new control that is never clicked", noClick(`pointer={{ path: [], clicks: [] }}`, true));
+ok("click guard accepts a click", !noClick(`pointer={{ path: [], clicks: [78] }}`, true));
+ok("caption guard rejects before/after labels", rejects(`<p className="text-xs">After: avatar image with object-cover</p>`));
+ok("caption guard rejects code shown as text", rejects(`<code>{'className={cn("object-cover", className)}'}</code>`));
+ok("caption guard accepts Tailwind before:/after: variants", !rejects(`<span className="after:content-[''] before:absolute" />`));
+ok("caption guard accepts text that exists in the sources", !rejects(`<p>Before: read this</p>`, "<p>Before: read this</p>"));
+
+console.log(`\n${pass} passed, ${fail} failed`);
+if (fail > 0) process.exit(1);

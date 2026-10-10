@@ -6,9 +6,10 @@ is needed, and keeps the `Feature-Rec` Check Run pending until a reviewer choose
 `Good to merge` or submits feedback through `Needs changes`. Backend-only,
 docs-only, test-only, dependency-only, and CI-only changes are auto-accepted.
 
-The renderer recreates changed UI source as Remotion components and produces a
-deterministic, silent MP4 without launching the target application. It also runs
-locally on bundled fixtures or git diffs.
+The renderer stages the change with a scene kit and, when it can, renders the PR's
+real before/after components untouched (otherwise it recreates the UI from the diff),
+producing a deterministic, silent MP4 without launching the target application. It
+also runs locally on bundled fixtures or git diffs.
 
 [How Feature-Rec works](docs/product.md) is the canonical description of the review flow,
 Slack commands and tenant isolation. [Onboarding a tenant](docs/tenant-onboarding.md)

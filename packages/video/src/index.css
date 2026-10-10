@@ -1,10 +1,13 @@
 @import "tailwindcss";
+/* The target repository's Tailwind theme (custom colors, radii, CSS variables), see
+ * @autodemo/cli agent/theme.ts. */
+@import "./kit/fonts.css";
+@import "./target-theme.css";
 
 /*
  * The reproduced UI relies on Tailwind utility classes (incl. arbitrary values
  * like bg-[#16161F]) so the same classNames from the target repo render 1:1.
  * Tailwind v4 scans the source for class literals automatically.
  */
-:root {
-  color-scheme: dark;
-}
+/* No color-scheme here: text without an explicit color must render like it does in the product
+ * (the Stage sets the default text color from the page background). */

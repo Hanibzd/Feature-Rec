@@ -106,10 +106,32 @@ TSX/JSX source.` That happens, for example, when the first three such files are 
 a later one survives. Changes that touch only stylesheets or plain modules cannot be rendered
 either.
 
-For each source, a Claude-based replication agent turns the before and after source into a
-self-contained Remotion scene, styled with the repository's Tailwind configuration and global CSS
-when it finds them. The target application is never built, launched or executed. The scenes are
-composed into one H.264 MP4 without an audio track, which the action uploads (up to 500 MB).
+A changed file that another selected file imports gets no scene of its own: it is shown in context
+by the importing file's scene.
+
+For each source, a Claude-based agent writes one Remotion scene with the scene kit
+(`packages/video/src/kit`): the whole component framed, a light zoom only for small elements, a
+macOS-style pointer, and the change animated the way a user would meet it. The UI itself comes from
+one of two places:
+
+- **Real components.** When the changed file and its local imports (relative paths and tsconfig
+  aliases) only use React, `clsx`, `tailwind-merge`, `class-variance-authority`, `lucide-react`,
+  `next/link` or `next/image`, the before and after files are read at the PR's base and head
+  commits and rendered untouched, so the UI is exactly the code's. The pointer's clicks are real DOM
+  clicks on those components, and their own CSS transitions are replayed frame by frame.
+- **Reconstruction.** Otherwise the agent rebuilds the UI from the diff.
+
+The repository's Tailwind theme (`tailwind.config` colors, radii, fonts…) and the CSS variables of
+its global stylesheet are injected into the renderer; the config is read statically, never executed.
+If the renderer cannot compile the theme, the video is rendered again without it. The target application is never built or launched, but in real mode
+its component code runs inside the render browser, where network access is blocked (`fetch`, XHR,
+WebSocket, beacons and external images) and rendering is deterministic.
+
+A scene is checked before rendering (scene validation, real components not retyped, TypeScript
+errors in the scene); a failed check, or a failed render, is fed back to the agent for one repair
+attempt. The scenes are composed into one H.264 MP4 without an audio track, which the action uploads
+(up to 500 MB). Unless `upload-video` is `false`, the action also keeps the MP4, the generated scene
+code and the injected theme as a workflow artifact for seven days.
 
 Generation needs `ANTHROPIC_API_KEY`. Without it, or when generation fails, only the bundled
 fixture scenes (`dark-mode-toggle` and `invite-members`) can render, and any other change fails.
