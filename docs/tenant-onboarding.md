@@ -143,7 +143,9 @@ In each repository that should use Feature-Rec:
    with a tested release tag or commit SHA so that changes to the action reach the repository only
    when you update the pin.
 3. Add an `ANTHROPIC_API_KEY` repository or organization secret. The example passes it to the
-   action, which needs it for every PR that requires review.
+   action, which needs it for every PR that requires review. If the key stops working, only PRs
+   with renderable `.tsx` or `.jsx` changes fail; see
+   [Change classification](product.md#change-classification).
 4. Leave the action's `api-url` input unset for the hosted service; it defaults to
    `https://api.feature-rec.com`. A self-hosted backend sets `api-url` to its public origin, which
    must equal the backend's `FEATURE_REC_BASE_URL` because it is the OIDC audience.
@@ -263,6 +265,9 @@ encrypts the token itself, and reports provider errors as they occur.
 | A backend call fails with `401` | The action's `api-url` does not match the backend's `FEATURE_REC_BASE_URL`, or the workflow was not triggered by `pull_request`. |
 | A backend call fails with `403` | The tenant is not provisioned or is disabled, or its GitHub App installation does not grant the repository. Provision the tenant or grant the repository. |
 | `ANTHROPIC_API_KEY is required to classify frontend-visible changes` | Add the secret; see [Add the workflow](#add-the-workflow). |
+| The check summary of an accepted PR contains `Anthropic API error` | Claude could not classify the PR, so the filename heuristic accepted it. Fix the key, credit or spend limit named in the error. |
+| `Anthropic API error … This PR has frontend changes that Feature-Rec cannot render without a working ANTHROPIC_API_KEY` | Fix the key, credit or spend limit named in the error, or wait for the provider, then rerun the workflow. |
+| The check summary contains `Accepted without Slack validation` | The PR looked frontend-visible, but no `.tsx` or `.jsx` file could be rendered (for example, a stylesheet-only change). Review the change manually if needed. |
 | `Invite @Feature-Rec to your Slack review channel, then re-run.` | No usable review channel: the bot is in no channel, was removed from the selected channel, or is in several channels with none selected. Invite the bot or run `/feature-rec channel #channel-name`, then rerun the workflow. |
 | `Feature-Rec is present in multiple channels…` | Run `/feature-rec channel #channel-name`, then rerun the workflow. |
 | `Feature-Rec is not currently in the selected review channel…` | Invite the bot back or select another channel, then rerun the workflow. |

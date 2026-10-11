@@ -32,6 +32,12 @@ const server = createServer((request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     const body = Buffer.concat(chunks).toString();
+    // Fake Anthropic Messages API with a broken key, reached through
+    // ANTHROPIC_BASE_URL. Provider calls are not backend calls.
+    if (url.pathname === "/v1/messages") {
+      response.writeHead(401).end(JSON.stringify({ type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } }));
+      return;
+    }
     calls.push({ path: url.pathname, token: request.headers.authorization, body, attempt: request.headers["x-feature-rec-attempt"] as string | undefined });
     if (url.pathname.endsWith("/start")) response.end(JSON.stringify(startResponse));
     else response.writeHead(backendStatus).end(JSON.stringify(settledFailure
@@ -103,6 +109,43 @@ try {
   delete childEnv.ANTHROPIC_API_KEY;
   delete childEnv.FEATURE_REC_ALLOW_HEURISTIC_CLASSIFIER;
   const runAction = () => run(process.execPath, ["--import", "tsx", "src/index.ts", "--repo", repoRoot, "--event", eventPath, "--api-url", apiUrl], { cwd: actionRoot, env: childEnv });
+
+  // A fixture repository whose heads each change one file: a stylesheet
+  // (frontend candidate without renderable source), a TSX component, and a
+  // backend module. Every head branches from the same base commit.
+  const fixtureRepo = path.join(temporary, "repo");
+  await fs.mkdir(path.join(fixtureRepo, "src/components"), { recursive: true });
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "selftest", GIT_AUTHOR_EMAIL: "selftest@example.com",
+    GIT_COMMITTER_NAME: "selftest", GIT_COMMITTER_EMAIL: "selftest@example.com",
+  };
+  const git = async (...args: string[]) =>
+    (await run("git", ["-c", "commit.gpgsign=false", ...args], { cwd: fixtureRepo, env: gitEnv })).stdout.trim();
+  await git("init", "-q", "-b", "main");
+  await fs.writeFile(path.join(fixtureRepo, "src/components/Button.tsx"), "export const Button = () => <button>Save</button>;\n");
+  await fs.writeFile(path.join(fixtureRepo, "src/styles.css"), ".button { color: red; }\n");
+  await fs.writeFile(path.join(fixtureRepo, "server.ts"), "export const port = 3000;\n");
+  await git("add", ".");
+  await git("commit", "-q", "-m", "base");
+  const baseSha = await git("rev-parse", "HEAD");
+  const headWith = async (file: string, content: string) => {
+    await git("checkout", "-q", baseSha);
+    await fs.writeFile(path.join(fixtureRepo, file), content);
+    await git("commit", "-q", "-am", `change ${file}`);
+    return git("rev-parse", "HEAD");
+  };
+  const cssHead = await headWith("src/styles.css", ".button { color: blue; }\n");
+  const tsxHead = await headWith("src/components/Button.tsx", "export const Button = () => <button>Save changes</button>;\n");
+  const backendHead = await headWith("server.ts", "export const port = 4000;\n");
+  const runActionOn = async (headSha: string, env: NodeJS.ProcessEnv) => {
+    const fixtureEvent = path.join(temporary, "fixture-event.json");
+    await fs.writeFile(fixtureEvent, JSON.stringify({
+      action: "synchronize", repository: { name: "ignored", owner: { login: "ignored" } },
+      pull_request: { number: 7, state: "open", draft: false, title: "Change", user: { login: "ignored" }, base: { sha: baseSha }, head: { sha: headSha } },
+    }));
+    return run(process.execPath, ["--import", "tsx", "src/index.ts", "--repo", fixtureRepo, "--event", fixtureEvent, "--api-url", apiUrl], { cwd: actionRoot, env });
+  };
   for (const reason of ["closed", "draft", "stale_head"]) {
     startResponse = { skipped: true, reason };
     const beforeCalls = calls.length;
@@ -125,6 +168,54 @@ try {
     assert.doesNotMatch(lastError, /\/failed failed/);
     return true;
   });
+  backendStatus = 200;
+
+  // Stylesheet-only PR: frontend-visible by the heuristic, but nothing the
+  // renderer can reproduce. Accepted with a note instead of failing, so the
+  // merge is not blocked.
+  calls.length = 0;
+  await runActionOn(cssHead, { ...childEnv, FEATURE_REC_ALLOW_HEURISTIC_CLASSIFIER: "1" });
+  assert.deepEqual(calls.map(call => call.path), ["/api/runs/start", "/api/runs/cycle-a/accepted"]);
+  const stylesheetAccept = JSON.parse(calls[1].body) as { frontendVisible: boolean; reason: string; attemptId: string };
+  assert.equal(stylesheetAccept.frontendVisible, true);
+  assert.match(stylesheetAccept.reason, /Changed files include frontend\/UI candidates/);
+  assert.match(stylesheetAccept.reason, /no renderable TSX\/JSX source/);
+  assert.equal(stylesheetAccept.attemptId, "attempt-a");
+
+  // Broken key (401) and a TSX change: rendering needs the same key, so the
+  // run fails before rendering, with the provider cause and the key hint.
+  const brokenKeyEnv = { ...childEnv, ANTHROPIC_API_KEY: "test-key", ANTHROPIC_BASE_URL: apiUrl };
+  calls.length = 0;
+  await assert.rejects(runActionOn(tsxHead, brokenKeyEnv), (error: unknown) => {
+    const failure = error as Error & { stderr: string };
+    assert.match(failure.stderr, /Anthropic API error 401 \(authentication_error\): invalid x-api-key/);
+    return true;
+  });
+  assert.deepEqual(calls.map(call => call.path), ["/api/runs/start", "/api/runs/cycle-a/failed"]);
+  const tsxFailure = JSON.parse(calls[1].body) as { message: string };
+  assert.match(tsxFailure.message, /Anthropic API error 401 \(authentication_error\): invalid x-api-key/);
+  assert.match(tsxFailure.message, /ANTHROPIC_API_KEY/);
+  assert.doesNotMatch(tsxFailure.message, /Cannot render|Agent response/);
+
+  // Broken key and a backend-only change: the heuristic accepts the PR, and
+  // the check summary names the provider failure.
+  calls.length = 0;
+  await runActionOn(backendHead, brokenKeyEnv);
+  assert.deepEqual(calls.map(call => call.path), ["/api/runs/start", "/api/runs/cycle-a/accepted"]);
+  const backendAccept = JSON.parse(calls[1].body) as { frontendVisible: boolean; reason: string; providerError?: string };
+  assert.equal(backendAccept.frontendVisible, false);
+  assert.match(backendAccept.reason, /Anthropic API error 401 \(authentication_error\): invalid x-api-key/);
+  assert.equal(backendAccept.providerError, undefined, "The fallback marker stays in the runner");
+
+  // Broken key and a stylesheet-only change: nothing to render even with a
+  // working key, so it is accepted with the note and the provider cause.
+  calls.length = 0;
+  await runActionOn(cssHead, brokenKeyEnv);
+  assert.deepEqual(calls.map(call => call.path), ["/api/runs/start", "/api/runs/cycle-a/accepted"]);
+  const stylesheetUnderFailure = JSON.parse(calls[1].body) as { frontendVisible: boolean; reason: string };
+  assert.equal(stylesheetUnderFailure.frontendVisible, true);
+  assert.match(stylesheetUnderFailure.reason, /no renderable TSX\/JSX source/);
+  assert.match(stylesheetUnderFailure.reason, /Anthropic API error 401/);
 } finally {
   for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
   Object.assign(process.env, saved);
