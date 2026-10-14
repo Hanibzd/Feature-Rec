@@ -5,6 +5,10 @@ inputs:
     description: Public URL for a self-hosted Feature-Rec backend.
     required: false
     default: https://api.feature-rec.com
+  upload-video:
+    description: Upload the rendered video and its generated scene code as a workflow artifact (kept 7 days).
+    required: false
+    default: "true"
 runs:
   using: composite
   steps:
@@ -21,3 +25,25 @@ runs:
           --repo "$GITHUB_WORKSPACE" \
           --api-url "${{ inputs.api-url }}" \
           --event "$GITHUB_EVENT_PATH"
+
+    # The video otherwise only exists in Slack: keep it (and the scene code that produced it)
+    # next to the run for review and debugging. Runs even when the render or upload failed.
+    - name: Collect Feature-Rec video
+      if: ${{ always() && inputs.upload-video == 'true' }}
+      shell: bash
+      run: |
+        OUT="$RUNNER_TEMP/feature-rec-video"
+        ACTION_REPO_ROOT="$(cd "$GITHUB_ACTION_PATH/../.." && pwd)"
+        mkdir -p "$OUT/scenes"
+        cp "$ACTION_REPO_ROOT/out/demo.mp4" "$OUT/" 2>/dev/null || true
+        cp "$ACTION_REPO_ROOT"/packages/video/src/scenes/generated/*.tsx "$OUT/scenes/" 2>/dev/null || true
+        cp "$ACTION_REPO_ROOT/packages/video/src/target-theme.css" "$OUT/" 2>/dev/null || true
+
+    - name: Upload Feature-Rec video
+      if: ${{ always() && inputs.upload-video == 'true' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: feature-rec-video-pr${{ github.event.pull_request.number }}-run${{ github.run_attempt }}
+        path: ${{ runner.temp }}/feature-rec-video
+        if-no-files-found: ignore
+        retention-days: 7

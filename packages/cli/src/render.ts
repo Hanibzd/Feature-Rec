@@ -6,8 +6,12 @@ import { readPlan } from "./compose";
 import { log } from "./log";
 import { BUNDLE_CACHE, OUT_DIR, OUT_MP4, VIDEO_ENTRY } from "./paths";
 
-export async function renderDemo(): Promise<string> {
-  const plan = readPlan();
+/**
+ * `strictClicks`: a pointer click on a real component that changes nothing fails the render, so
+ * the scene can be repaired (see kit/Stage.tsx). Off for the last-resort render.
+ */
+export async function renderDemo(opts: { strictClicks?: boolean } = {}): Promise<string> {
+  const plan = { ...readPlan(), strictClicks: Boolean(opts.strictClicks) };
   fs.mkdirSync(OUT_DIR, { recursive: true });
 
   log.step("Bundling Remotion project (Tailwind enabled)…");
