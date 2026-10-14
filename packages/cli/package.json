@@ -15,11 +15,11 @@
     "publish": "tsx src/index.ts publish",
     "demo": "tsx src/index.ts demo",
     "typecheck": "tsc --noEmit",
-    "selftest": "tsx scripts/validate-selftest.mts"
+    "selftest": "tsx scripts/validate-selftest.mts && tsx scripts/agent-selftest.mts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.106.0",
     "@autodemo/video": "workspace:*",
+    "@feature-rec/llm": "workspace:*",
     "@remotion/bundler": "4.0.484",
     "@remotion/renderer": "4.0.484",
     "@remotion/tailwind-v4": "4.0.484",

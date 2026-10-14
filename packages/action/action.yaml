@@ -5,13 +5,55 @@ inputs:
     description: Public URL for a self-hosted Feature-Rec backend.
     required: false
     default: https://api.feature-rec.com
+  llm-provider:
+    description: LLM provider (anthropic, openai, openrouter or openai-compatible). Auto-detected from the API key variables when empty.
+    required: false
+    default: ""
+  llm-api-key:
+    description: LLM API key for the selected provider. Pass it from a secret.
+    required: false
+    default: ""
+  llm-base-url:
+    description: Base URL of the OpenAI-compatible API. Required for openai-compatible.
+    required: false
+    default: ""
+  model:
+    description: Model id used for classification and scene generation. Required for providers other than anthropic.
+    required: false
+    default: ""
+  classifier-model:
+    description: Optional lighter model for classification. Defaults to model.
+    required: false
+    default: ""
+  max-tokens:
+    description: Output token cap for scene generation. Defaults to 16000.
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
     - name: Run Feature-Rec
       shell: bash
+      # Inputs travel through env, never interpolated into the script text, so
+      # the key cannot end up in the rendered script and values cannot inject shell.
+      env:
+        FEATURE_REC_INPUT_LLM_PROVIDER: ${{ inputs.llm-provider }}
+        FEATURE_REC_INPUT_LLM_API_KEY: ${{ inputs.llm-api-key }}
+        FEATURE_REC_INPUT_LLM_BASE_URL: ${{ inputs.llm-base-url }}
+        FEATURE_REC_INPUT_MODEL: ${{ inputs.model }}
+        FEATURE_REC_INPUT_CLASSIFIER_MODEL: ${{ inputs.classifier-model }}
+        FEATURE_REC_INPUT_MAX_TOKENS: ${{ inputs.max-tokens }}
       run: |
         set -euo pipefail
+        # A filled input wins; an empty one leaves an existing env variable alone.
+        if [ -n "$FEATURE_REC_INPUT_LLM_PROVIDER" ]; then export FEATURE_REC_LLM_PROVIDER="$FEATURE_REC_INPUT_LLM_PROVIDER"; fi
+        if [ -n "$FEATURE_REC_INPUT_LLM_API_KEY" ]; then export FEATURE_REC_LLM_API_KEY="$FEATURE_REC_INPUT_LLM_API_KEY"; fi
+        if [ -n "$FEATURE_REC_INPUT_LLM_BASE_URL" ]; then export FEATURE_REC_LLM_BASE_URL="$FEATURE_REC_INPUT_LLM_BASE_URL"; fi
+        if [ -n "$FEATURE_REC_INPUT_MODEL" ]; then export FEATURE_REC_MODEL="$FEATURE_REC_INPUT_MODEL"; fi
+        if [ -n "$FEATURE_REC_INPUT_CLASSIFIER_MODEL" ]; then export FEATURE_REC_CLASSIFIER_MODEL="$FEATURE_REC_INPUT_CLASSIFIER_MODEL"; fi
+        if [ -n "$FEATURE_REC_INPUT_MAX_TOKENS" ]; then export FEATURE_REC_MAX_TOKENS="$FEATURE_REC_INPUT_MAX_TOKENS"; fi
+        unset FEATURE_REC_INPUT_LLM_PROVIDER FEATURE_REC_INPUT_LLM_API_KEY FEATURE_REC_INPUT_LLM_BASE_URL \
+          FEATURE_REC_INPUT_MODEL FEATURE_REC_INPUT_CLASSIFIER_MODEL FEATURE_REC_INPUT_MAX_TOKENS
         corepack enable
         ACTION_REPO_ROOT="$(cd "$GITHUB_ACTION_PATH/../.." && pwd)"
         cd "$ACTION_REPO_ROOT"
