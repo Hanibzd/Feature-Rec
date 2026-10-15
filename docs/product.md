@@ -55,7 +55,8 @@ is in one of the statuses `analyzing`, `pending_validation`, `accepted`, `reject
    their buttons. Starts for the same PR are serialized, so at most one head is active.
 5. **Classification.** The action decides whether the diff is frontend-visible; see
    [Change classification](#change-classification). If it is not, the cycle becomes `accepted` and
-   the check succeeds with the classifier's reasoning.
+   the check succeeds with the classifier's reasoning. A frontend-visible diff with no renderable
+   `.tsx` or `.jsx` source is accepted the same way, with a note; see [Demo videos](#demo-videos).
 6. **Channel pre-check.** For a frontend-visible change, the start response already told the action
    whether the tenant has a usable review channel. If it has none, the run fails with
    `Invite @Feature-Rec to your Slack review channel, then re-run.` before spending time on
@@ -86,6 +87,15 @@ frontend-visible change worth validating. It sends the PR title, the changed fil
 The classifier also names the files that carry the visible change; the renderer prefers those
 within the limits described in [Demo videos](#demo-videos).
 
+If Claude cannot answer (an invalid key, exhausted credit, a spend limit, or a provider outage),
+the filename heuristic described below decides instead, and the classifier's reason names the
+provider error. A diff without candidates is accepted as usual, so a broken key does not block
+backend-only PRs; the error shows in the check summary of every PR accepted this way. A diff with
+candidates that the renderer can reproduce fails the run with the provider error and a request to
+fix `ANTHROPIC_API_KEY`, because rendering needs the same key. Candidates that cannot be rendered
+are accepted with a note, as described in [Demo videos](#demo-videos). A truncated or malformed
+answer from Claude is not a provider error and fails the run.
+
 Without `ANTHROPIC_API_KEY`, a filename heuristic runs instead. Frontend candidates are `.tsx`,
 `.jsx`, `.css` and `.scss` files, plus `.ts` and `.js` files inside a directory named `app`,
 `pages`, `components` or `ui`; files containing `.test.`, `.spec.` or `.stories.` never count. A
@@ -100,11 +110,12 @@ review must provide it. The workflow settings are listed in
 The renderer considers only the first three changed `.tsx` or `.jsx` files in path order, skipping
 test, spec and story files. Files the PR deletes are dropped after that cut, and the classifier's
 named files are preferred only among those three; when it names none of them, all are used. Later
-files are never rendered, even when the classifier names them. If nothing remains, the run fails
-with `Classifier found a frontend-visible change, but Feature-Rec could not extract reproducible
-TSX/JSX source.` That happens, for example, when the first three such files are all deleted, even if
-a later one survives. Changes that touch only stylesheets or plain modules cannot be rendered
-either.
+files are never rendered, even when the classifier names them. If nothing remains, there is no demo
+to validate: the cycle is accepted without Slack validation, and the check summary carries the
+classifier verdict and the note `Accepted without Slack validation: the change looks
+frontend-visible, but Feature-Rec found no renderable TSX/JSX source to demo (for example, a
+stylesheet-only change).` That happens for changes that touch only stylesheets or plain modules, and
+when the first three such files are all deleted, even if a later one survives.
 
 A changed file that another selected file imports gets no scene of its own: it is shown in context
 by the importing file's scene.
@@ -146,6 +157,7 @@ protection must require the check, not the job.
 | --- | --- | --- |
 | Cycle started, or a rerun took over a failed cycle | in progress | `Feature-Rec: analyzing` |
 | Not frontend-visible | success | `Feature-Rec: accepted`, with the classifier verdict |
+| Frontend-visible, but no renderable source | success | `Feature-Rec: accepted`, with the classifier verdict and the note from [Demo videos](#demo-videos) |
 | Video sent to Slack | in progress | `Feature-Rec: pending validation` |
 | `Good to merge` | success | `Feature-Rec: accepted`, linking the PR comment |
 | `Needs changes` | action required | `Feature-Rec: rejected`, linking the PR comment |
