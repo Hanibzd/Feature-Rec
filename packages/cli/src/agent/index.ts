@@ -1,3 +1,4 @@
+import { API_KEY_VARIABLES, createLlmClient, resolveLlmConfig, type LlmClient, type LlmConfig, type LlmTurn } from "@feature-rec/llm";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -5,13 +6,13 @@ import type { Feature, ProjectTokens } from "../analyze";
 import { log } from "../log";
 import { VIDEO_DIR } from "../paths";
 import { writeSceneFile } from "../scenes";
-import { callClaude, hasApiKey, type Turn } from "./anthropic";
+import { callLlm } from "./llm";
 import { hasOfflineScene } from "./offline";
 import { buildPrompt } from "./prompt";
 import { addsClickHandler, assertNoRetyping, localImportSources, prepareRealComponents, type RealComponents, type RevisionReader } from "./real";
 import { extractCodeBlock, validateScene } from "./validate";
 
-export type ReplicationSource = "anthropic" | "offline";
+export type ReplicationSource = "llm" | "offline";
 
 export type ReplicationResult = {
   id: string;
@@ -82,7 +83,9 @@ type Session = {
   id: string;
   system: string;
   cached: string;
-  turns: Turn[];
+  turns: LlmTurn[];
+  client: LlmClient;
+  config: LlmConfig;
   real: RealComponents | null;
   before: string;
   after: string;
@@ -113,7 +116,7 @@ function typecheckScene(id: string): string[] {
 /** Ask, check, and write the scene; each failure is fed back to the model once. */
 async function generate(session: Session, attempts: number): Promise<void> {
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    const raw = await callClaude({ system: session.system, cached: session.cached, turns: session.turns });
+    const raw = await callLlm(session.client, session.config, { system: session.system, cached: session.cached, turns: session.turns });
     session.turns.push({ role: "assistant", content: raw });
     let problem: string;
     try {
@@ -147,7 +150,7 @@ async function generate(session: Session, attempts: number): Promise<void> {
 
 /**
  * Turn one detected UI change into a Remotion scene file.
- * Order of preference: Claude agent (if a key is present) -> known-good fallback.
+ * Order of preference: LLM agent (if a key is configured) -> known-good fallback.
  * With repository access (`read`), the PR's real components are used when they can be rendered.
  */
 export async function replicate(
@@ -155,9 +158,10 @@ export async function replicate(
   tokens: ProjectTokens,
   opts: { offline?: boolean; read?: RevisionReader; themeLoaded?: boolean } = {},
 ): Promise<ReplicationResult> {
-  const useApi = !opts.offline && hasApiKey();
+  // Offline mode skips configuration checks and all LLM calls.
+  const config = opts.offline ? null : resolveLlmConfig(process.env);
 
-  if (useApi) {
+  if (config) {
     const real = prepareRealComponents({
       id: feature.id,
       file: feature.file,
@@ -172,6 +176,8 @@ export async function replicate(
     const prompt = buildPrompt(feature, tokens, { real, themeLoaded: Boolean(opts.themeLoaded), localImports });
     const session: Session = {
       id: feature.id,
+      client: createLlmClient(config),
+      config,
       system: prompt.system,
       cached: prompt.cached,
       turns: [{ role: "user", content: prompt.request }],
@@ -192,7 +198,7 @@ export async function replicate(
       log.info(`Calling the replication agent for "${feature.id}"…`);
       await generate(session, ATTEMPTS);
       log.ok(`Agent reproduced "${feature.id}" → scenes/generated/${feature.id}.tsx`);
-      return { id: feature.id, source: "anthropic", wrote: true, real: Boolean(real) };
+      return { id: feature.id, source: "llm", wrote: true, real: Boolean(real) };
     } catch (err) {
       sessions.delete(feature.id);
       log.warn(`Agent failed for "${feature.id}": ${(err as Error).message}`);
@@ -206,13 +212,13 @@ export async function replicate(
 
   if (hasOfflineScene(feature.id)) {
     if (opts.offline) log.info(`Offline mode — using known-good scene for "${feature.id}".`);
-    else log.info(`No ANTHROPIC_API_KEY — using known-good scene for "${feature.id}".`);
+    else log.info(`No LLM API key — using known-good scene for "${feature.id}".`);
     return { id: feature.id, source: "offline", wrote: false, real: false };
   }
 
   throw new Error(
-    `Cannot replicate "${feature.id}": no ANTHROPIC_API_KEY set and no known-good scene available. ` +
-      `Export ANTHROPIC_API_KEY to let the agent generate it.`,
+    `Cannot replicate "${feature.id}": no LLM API key set and no known-good scene available. ` +
+      `Set ${API_KEY_VARIABLES} to let the agent generate it.`,
   );
 }
 

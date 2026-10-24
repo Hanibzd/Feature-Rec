@@ -33,3 +33,11 @@ jobs:
       - uses: Hanibzd/Feature-Rec/packages/action@main
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      # Another provider instead of Anthropic, for example OpenRouter. Replace the
+      # step above with this one; `model` is required for every non-Anthropic provider.
+      # - uses: Hanibzd/Feature-Rec/packages/action@main
+      #   with:
+      #     llm-provider: openrouter
+      #     llm-api-key: ${{ secrets.OPENROUTER_API_KEY }}
+      #     model: <OpenRouter model id>
