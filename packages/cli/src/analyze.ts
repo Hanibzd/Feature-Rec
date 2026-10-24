@@ -15,12 +15,16 @@ export type Feature = {
   caption: string;
   before: string;
   after: string;
+  /** Files (at the PR head) that render this component: its real surroundings. */
+  usages?: Array<{ path: string; content: string }>;
 };
 
 /** Project design tokens injected into the replication agent. */
 export type ProjectTokens = {
   tailwindConfig: string;
   globalsCss: string;
+  /** Path of the tailwind config file, when it exists on disk (used to load the theme). */
+  tailwindConfigPath?: string;
 };
 
 function readIfExists(p: string): string {

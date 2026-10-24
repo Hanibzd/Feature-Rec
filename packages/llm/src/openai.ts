@@ -35,11 +35,17 @@ export function buildOpenAiRequest(
   provider: LlmProvider,
   req: LlmRequest,
 ): ChatCompletionCreateParamsNonStreaming {
+  const turns = req.turns ?? [{ role: "user" as const, content: req.user }];
   const base = {
     model: req.model,
     messages: [
       { role: "system" as const, content: req.system },
-      { role: "user" as const, content: req.user },
+      ...turns.map((turn, i) => ({
+        role: turn.role,
+        content: i === 0 && turn.role === "user" && req.cached
+          ? `${req.cached}\n\n${turn.content}`
+          : turn.content,
+      })),
     ],
   };
   return provider === "openai"

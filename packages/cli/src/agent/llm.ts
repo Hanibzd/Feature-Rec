@@ -1,16 +1,17 @@
-import { LlmError, type LlmClient, type LlmConfig } from "@feature-rec/llm";
+import { LlmError, type LlmClient, type LlmConfig, type LlmTurn } from "@feature-rec/llm";
 
-/** Single-shot scene-generation call. Returns the response text. */
+/** Send the scene conversation, including repair turns. Return the response text. */
 export async function callLlm(
   client: LlmClient,
   config: LlmConfig,
-  opts: { system: string; prompt: string },
+  opts: { system: string; cached?: string; turns: LlmTurn[] },
 ): Promise<string> {
   let response;
   try {
     response = await client.complete({
       system: opts.system,
-      user: opts.prompt,
+      cached: opts.cached,
+      turns: opts.turns,
       model: config.model,
       maxTokens: config.maxTokens,
     });

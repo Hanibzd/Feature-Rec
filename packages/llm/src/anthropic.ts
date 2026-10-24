@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { Message, MessageCreateParamsNonStreaming } from "@anthropic-ai/sdk/resources/messages";
+import type { Message, MessageCreateParamsNonStreaming, MessageParam } from "@anthropic-ai/sdk/resources/messages";
 import { emptyResponseError, llmFailure, type LlmClient, type LlmRequest, type LlmResponse } from "./client";
 import type { LlmConfig } from "./config";
 
@@ -14,11 +14,25 @@ export function anthropicClientOptions(config: LlmConfig) {
 }
 
 export function buildAnthropicRequest(req: LlmRequest): MessageCreateParamsNonStreaming {
+  const turns = req.turns ?? [{ role: "user" as const, content: req.user }];
+  const messages: MessageParam[] = turns.map((turn, i) =>
+    i === 0 && turn.role === "user" && req.cached
+      ? {
+          role: "user",
+          content: [
+            { type: "text", text: req.cached, cache_control: { type: "ephemeral" } },
+            { type: "text", text: turn.content },
+          ],
+        }
+      : { role: turn.role, content: turn.content },
+  );
   return {
     model: req.model,
     max_tokens: req.maxTokens,
-    system: req.system,
-    messages: [{ role: "user", content: req.user }],
+    system: req.turns
+      ? [{ type: "text", text: req.system, cache_control: { type: "ephemeral" } }]
+      : req.system,
+    messages,
   };
 }
 

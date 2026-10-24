@@ -13,7 +13,7 @@ export {
   type LlmConfig,
   type LlmProvider,
 } from "./config";
-export { LlmError, type LlmClient, type LlmRequest, type LlmResponse } from "./client";
+export { LlmError, type LlmClient, type LlmRequest, type LlmResponse, type LlmTurn } from "./client";
 
 export function formatUsage(response: LlmResponse, durationMs: number): string {
   const usage = response.usage;

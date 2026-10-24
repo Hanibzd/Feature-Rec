@@ -1,11 +1,15 @@
 import type { LlmProvider } from "./config";
 
-export interface LlmRequest {
+export type LlmTurn = { role: "user" | "assistant"; content: string };
+
+export type LlmRequest = {
   system: string;
-  user: string;
   maxTokens: number;
   model: string;
-}
+} & (
+  | { user: string; turns?: never; cached?: never }
+  | { turns: LlmTurn[]; cached?: string; user?: never }
+);
 
 export interface LlmResponse {
   text: string;

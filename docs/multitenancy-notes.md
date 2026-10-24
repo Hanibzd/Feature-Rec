@@ -6,8 +6,9 @@ The singleton designs below are historical and are superseded by the
 [OIDC and multitenancy plan](plans/feature-rec-oidc-multitenancy-plan.md). The current tenant model,
 identity chain and Slack/GitHub isolation are described in
 [How Feature-Rec works](product.md#tenants-and-isolation). Hosted Slack installation storage,
-lifecycle-event handling, the release history, migrations and rollback are described in
-[Operations](operations.md).
+lifecycle-event handling, migrations and rollback are described in [Operations](operations.md). The
+release sequence is recorded in the
+[OIDC and multitenancy plan](plans/feature-rec-oidc-multitenancy-plan.md#migration-and-release-plan).
 
 ## Historical singleton notes
 

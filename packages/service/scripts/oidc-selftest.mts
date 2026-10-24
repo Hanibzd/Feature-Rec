@@ -13,10 +13,9 @@ for (const value of ["invalid", "http://localhost:3000", "http://example.com", "
 for (const nodeEnv of ["development", "test"]) {
   assert.equal(readEnv({ ...database, FEATURE_REC_BASE_URL: "http://127.0.0.1:3000/", NODE_ENV: nodeEnv }).baseUrl, "http://127.0.0.1:3000");
 }
-const serviceEnv = readEnv({ ...database, FEATURE_REC_BASE_URL: "HTTPS://SERVICE.EXAMPLE:443///", FEATURE_REC_RUNNER_TOKEN: "unused", GITHUB_TOKEN: "unused", FEATURE_REC_GITHUB_TOKEN: "unused", SLACK_BOT_TOKEN: "unused" });
+const serviceEnv = readEnv({ ...database, FEATURE_REC_BASE_URL: "HTTPS://SERVICE.EXAMPLE:443///", GITHUB_TOKEN: "unused", FEATURE_REC_GITHUB_TOKEN: "unused", SLACK_BOT_TOKEN: "unused" });
 assert.equal(serviceEnv.baseUrl, "https://service.example");
 assert.equal(serviceEnv.githubOidcIssuer, DEFAULT_GITHUB_OIDC_ISSUER);
-assert.equal("runnerToken" in serviceEnv, false);
 assert.equal("githubToken" in serviceEnv, false);
 assert.equal("slackBotToken" in serviceEnv, false);
 assert.equal(readEnv({ ...database, FEATURE_REC_BASE_URL: serviceEnv.baseUrl, GITHUB_OIDC_ISSUER: "https://issuer.example///" }).githubOidcIssuer, "https://issuer.example");

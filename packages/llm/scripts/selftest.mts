@@ -9,7 +9,7 @@ import type {
 import { anthropicClientOptions, createAnthropicClient } from "../src/anthropic";
 import { llmFailure, redactSecrets } from "../src/client";
 import { createOpenAiCompatibleClient, openAiClientOptions, stripThinking } from "../src/openai";
-import { createLlmClient, formatUsage, LlmError, resolveLlmConfig, type LlmConfig } from "../src/index";
+import { createLlmClient, formatUsage, LlmError, resolveLlmConfig, type LlmConfig, type LlmRequest } from "../src/index";
 
 // Fake keys only; nothing here reaches the network.
 const ANTHROPIC_KEY = "sk-ant-test-0000anthropic0000";
@@ -200,6 +200,17 @@ const compatibleConfig = resolve({
   FEATURE_REC_MODEL: "local-model",
 }).config!;
 const request = { system: "SYSTEM", user: "USER", maxTokens: 16000, model: "the-model" };
+const repairRequest: LlmRequest = {
+  system: "SYSTEM",
+  cached: "SCENE KIT",
+  turns: [
+    { role: "user", content: "Generate the scene" },
+    { role: "assistant", content: "Broken scene" },
+    { role: "user", content: "Fix the scene validation error" },
+  ],
+  maxTokens: 16000,
+  model: "the-model",
+};
 
 // --- Anthropic ----------------------------------------------------------------
 
@@ -260,6 +271,24 @@ function fakeAnthropic(reply: Message | Error) {
   );
   const response = await createAnthropicClient(anthropicConfig, fake.messages).complete(request);
   assert.equal(response.truncated, true);
+}
+{
+  const fake = fakeAnthropic(anthropicMessage([{ type: "text", text: "repaired", citations: null }], "end_turn"));
+  await createAnthropicClient(anthropicConfig, fake.messages).complete(repairRequest);
+  assert.deepEqual(fake.calls, [{
+    model: "the-model",
+    max_tokens: 16000,
+    system: [{ type: "text", text: "SYSTEM", cache_control: { type: "ephemeral" } }],
+    messages: [
+      { role: "user", content: [
+        { type: "text", text: "SCENE KIT", cache_control: { type: "ephemeral" } },
+        { type: "text", text: "Generate the scene" },
+      ] },
+      { role: "assistant", content: "Broken scene" },
+      { role: "user", content: "Fix the scene validation error" },
+    ],
+  }]);
+  assert.equal(repairRequest.turns[0].content, "Generate the scene");
 }
 await assert.rejects(
   () => createAnthropicClient(anthropicConfig, fakeAnthropic(anthropicMessage([], "end_turn")).messages).complete(request),
@@ -330,6 +359,17 @@ function fakeOpenAi(reply: ChatCompletion | Error) {
     provider: "openai",
     model: "the-model",
   });
+}
+for (const config of [openAiConfig, openRouterConfig, compatibleConfig]) {
+  const fake = fakeOpenAi(completion("repaired", "stop"));
+  await createOpenAiCompatibleClient(config, fake.completions).complete(repairRequest);
+  assert.deepEqual(fake.calls[0]?.messages, [
+    { role: "system", content: "SYSTEM" },
+    { role: "user", content: "SCENE KIT\n\nGenerate the scene" },
+    { role: "assistant", content: "Broken scene" },
+    { role: "user", content: "Fix the scene validation error" },
+  ]);
+  assert.equal(repairRequest.turns[0].content, "Generate the scene");
 }
 for (const config of [openRouterConfig, compatibleConfig]) {
   const fake = fakeOpenAi(completion("hello", "stop"));

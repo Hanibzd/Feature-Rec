@@ -20,9 +20,13 @@
     "@remotion/layout-utils": "4.0.484",
     "@remotion/renderer": "4.0.484",
     "@remotion/tailwind-v4": "4.0.484",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.52.0",
     "react": "19.0.0",
     "react-dom": "19.0.0",
     "remotion": "4.0.484",
+    "tailwind-merge": "^3.7.0",
     "tailwindcss": "^4.1.0",
     "zod": "^3.23.8"
   },
